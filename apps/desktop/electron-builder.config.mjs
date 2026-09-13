@@ -105,6 +105,9 @@ export function createElectronBuilderConfig(
       )
     },
     win: {
+      // Embedded into DeepSeek Harness.exe; NSIS and the portable stub inherit it from the executable.
+      // Built from the official in-repo artwork by `pnpm --dir apps/desktop-portable run icons`.
+      icon: fileURLToPath(new URL('./assets/icon.ico', import.meta.url)),
       forceCodeSigning: !unsigned,
       signtoolOptions: {
         sign: windowsSigner,
@@ -121,6 +124,9 @@ export function createElectronBuilderConfig(
       oneClick: false,
       allowToChangeInstallationDirectory: true,
       differentialPackage: true,
+      createStartMenuShortcut: true,
+      createDesktopShortcut: true,
+      shortcutName: 'DeepSeek Harness',
     },
     publish: update === undefined ? null : [{ provider: 'generic', url: update.publicUrl }],
   }

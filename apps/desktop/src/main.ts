@@ -1,6 +1,7 @@
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
 import { readFile, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -90,13 +91,30 @@ function developmentHostInspectPort(enabled: boolean): number | undefined {
   return port
 }
 
+/**
+ * Resolve the window icon.
+ *
+ * A packaged Windows build embeds the icon in the executable and Windows reads the taskbar, Alt+Tab,
+ * and shortcut icons from that resource, so an explicit path is unnecessary and is left out. The
+ * unpackaged development shell has no such resource, so it points at the repository asset to keep
+ * development and packaged presentation equivalent.
+ * @returns Absolute icon path, or undefined when the embedded executable resource should be used.
+ */
+function windowIcon(): string | undefined {
+  if (app.isPackaged) return undefined
+  const icon = join(app.getAppPath(), 'assets', 'icon.ico')
+  return existsSync(icon) ? icon : undefined
+}
+
 function createWindow(preload: string, show = false): BrowserWindow {
+  const icon = windowIcon()
   const window = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1000,
     minHeight: 700,
     show,
+    ...(icon === undefined ? {} : { icon }),
     webPreferences: {
       preload,
       nodeIntegration: false,

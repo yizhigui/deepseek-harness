@@ -8,6 +8,7 @@
  * @module @deepseek-ai/dsh-desktop-portable/portable-targets
  */
 
+import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +25,12 @@ export const DESKTOP_DIST_ROOT = join(REPOSITORY_ROOT, 'dist-desktop')
 
 /** Where electron-builder keeps its downloaded toolsets for add-on builds. */
 export const DESKTOP_BUILDER_CACHE = join(DESKTOP_BUILD_ROOT, 'downloads', 'electron-builder-cache')
+
+/** Application icon embedded into every Windows artifact, built by `scripts/build-icons.mjs`. */
+export const DESKTOP_ICON = join(DESKTOP_ROOT, 'assets', 'icon.ico')
+
+/** Name of the start-menu and desktop shortcuts the installer creates. */
+export const DESKTOP_SHORTCUT_NAME = 'DeepSeek Harness'
 
 /**
  * Load the official electron-builder configuration factory.
@@ -44,8 +51,9 @@ export async function loadOfficialConfigFactory() {
  * Build the configuration used by the add-on targets.
  *
  * `env` must already carry `DSH_DESKTOP_TARGET_PLATFORM=win32`, `DSH_DESKTOP_TARGET_ARCH=x64`, and
- * `DSH_DESKTOP_UNSIGNED=1`; this function only layers the extra target, its distinct artifact name,
- * the artifact directory, and the same-volume tool cache on top of the official configuration.
+ * `DSH_DESKTOP_UNSIGNED=1`; this function only layers the extra portable target, its distinct artifact
+ * name, and the artifact directory on top of the official configuration. The application icon and the
+ * NSIS shortcut settings live in the official config, so every Windows command shares one definition.
  *
  * The portable target shares the default `${productName}-${version}-setup.${ext}` name with the NSIS
  * installer, so both targets would otherwise write one file and the second would silently overwrite
@@ -59,6 +67,10 @@ export async function createPortableConfig(environment = process.env) {
   const windowsTargets = official.win?.target
   if (!Array.isArray(windowsTargets) || !windowsTargets.includes('nsis')) {
     throw new Error('desktop portable: the official Win target no longer includes nsis')
+  }
+  // Fail with an actionable message instead of whatever electron-builder reports for a missing icon.
+  if (!existsSync(DESKTOP_ICON)) {
+    throw new Error(`desktop portable: missing application icon ${DESKTOP_ICON}; run "pnpm --dir apps/desktop-portable run icons"`)
   }
   return {
     ...official,

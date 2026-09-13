@@ -50,6 +50,45 @@ pnpm --dir apps/desktop-portable exec node scripts/package-portable.mjs win-x64 
 `node_modules` in this directory links the workspace `electron-builder`, `app-builder-lib`, and
 `electron` exactly as `apps/desktop` resolves them, so no extra install step is required.
 
+## Application icon
+
+`apps/desktop/assets/` holds the icon set, built from artwork the repository already ships:
+
+| File | Role |
+|---|---|
+| `icon-source.svg` | The one source file: official whale path, brand blue `#4D6BFE`, 1024x1024, transparent, safe margin |
+| `icon.png` | 1024x1024 transparent raster |
+| `icon.ico` | 16, 24, 32, 48, 64, 128, and 256 entries |
+
+Regenerate all three from the official artwork with:
+
+```sh
+pnpm --dir apps/desktop-portable run icons
+```
+
+The generator reads the whale path out of `apps/web/public/favicon.svg` (byte-identical artwork to
+`website/public/favicon.svg`, which renders it in the same brand blue) and never traces, stretches, or
+redraws the mark. `sharp` is resolved from `packages/attachment/attachment-local`, the workspace
+package that already depends on it, so no new dependency is introduced.
+
+`apps/desktop/electron-builder.config.mjs` embeds `assets/icon.ico` into `DeepSeek Harness.exe`, and
+NSIS, the portable stub, the uninstaller, and both shortcuts inherit it from that executable resource —
+so an icon change is one regenerated file plus a rebuild, with no separate `.ico` path to maintain.
+The unpackaged development shell points a `BrowserWindow` at the same file, because a development
+Electron binary carries no embedded resource of its own.
+
+The installer creates both shortcuts without any post-install step:
+
+```jsonc
+nsis: { createStartMenuShortcut: true, createDesktopShortcut: true, shortcutName: 'DeepSeek Harness' }
+```
+
+`scripts/verify-desktop-shortcut.ps1` locates the installed application through the Windows uninstall
+registry (`DisplayIcon`, then `InstallLocation`, then `UninstallString`, then the `Programs`
+directories — never a build output), resolves the desktop directory through the Shell special-folder
+API, creates the shortcut if needed, verifies every field, and with `-Launch` starts the application
+through the shortcut and checks that the backend reaches ready and then exits with it.
+
 ## Shell configuration and the owned Harness home
 
 The shell resolves the Harness home it owns **before** it opens the profile or starts the backend,
@@ -102,7 +141,8 @@ for writing, and none is written.
 | Electron main process, preload, windows, IPC, protocol | `apps/desktop` (unchanged) |
 | Backend child-process lifecycle and readiness | `apps/desktop` (unchanged) |
 | Bundled Node.js, pnpm, and the production Harness tree | `apps/desktop` (unchanged) |
-| NSIS installer configuration | `apps/desktop` (unchanged) |
+| Application icon, NSIS installer and shortcut configuration | `apps/desktop` (official config) |
+| Icon artwork and generation | `apps/desktop/assets/`, `scripts/build-icons.mjs` |
 | Harness-home resolution and the shell log | `apps/desktop/src/desktop-config.ts`, `logger.ts` |
 | Extra `portable` target, `dist-desktop/` output, builder cache location | this directory |
 
