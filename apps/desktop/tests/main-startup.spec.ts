@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DESKTOP_IPC } from '../src/ipc.ts'
 
@@ -63,6 +64,7 @@ const harness = await vi.hoisted(async () => {
     getLocale: () => 'en-US',
     getVersion: () => '1.0.0',
     getAppPath: () => 'desktop-test-app',
+    getPath: (name: string) => (name === 'userData' ? 'desktop-test-user-data' : `desktop-test-${name}`),
     requestSingleInstanceLock: () => true,
     exit: vi.fn(),
     relaunch: vi.fn(),
@@ -139,6 +141,8 @@ beforeEach(() => {
   vi.stubEnv('DSH_DESKTOP_DSH_DIR', 'test-runtime')
   vi.stubGlobal('process', { ...process, resourcesPath: 'desktop-test-resources' })
   vi.stubEnv('DSH_DESKTOP_HOST_INSPECT_PORT', undefined)
+  // Keep the shell log inside the test's own directory instead of the machine-wide %APPDATA% path.
+  vi.stubEnv('DSH_DESKTOP_LOG_DIR', join(tmpdir(), 'desktop-main-startup-logs'))
 })
 
 afterEach(async () => {

@@ -22,6 +22,9 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
+// Re-exported so callers configure the log directory and the configuration directory consistently.
+export { defaultShellLogDirectory } from './config-directory.ts'
+
 /** Longest diagnostic line this module writes, in characters. */
 const MAX_LINE_CHARACTERS = 4_000
 
@@ -42,24 +45,6 @@ function describe(value: unknown): string {
   } catch {
     return String(value)
   }
-}
-
-/**
- * Resolve the log directory when no explicit override is configured.
- *
- * A packaged Windows application cannot carry an environment variable, and the portable executable
- * has no launcher to set one, so the shell computes this default itself. Windows uses the stable
- * `%APPDATA%\DeepSeekHarness\logs` location independent of Electron's product-name-derived user-data
- * directory; other platforms fall back to the Electron user-data directory.
- * @param environment - Process environment.
- * @param userDataPath - `app.getPath('userData')` from the Electron main process.
- * @returns Absolute log directory.
- */
-export function defaultShellLogDirectory(environment: NodeJS.ProcessEnv, userDataPath: string): string {
-  const appData = environment.APPDATA
-  return appData === undefined || appData.trim() === ''
-    ? join(userDataPath, 'logs')
-    : join(appData, 'DeepSeekHarness', 'logs')
 }
 
 /**

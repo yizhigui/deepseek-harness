@@ -23,6 +23,8 @@ import { DesktopUpdateCoordinator } from './update-coordinator.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
 import { initializeShellLog, writeShellLog, defaultShellLogDirectory } from './logger.ts'
+import { desktopConfigDirectory } from './config-directory.ts'
+import { desktopHostEnvironment, resolveDesktopHome } from './desktop-config.ts'
 
 const SCHEME = 'dsh-app'
 let focusPrimaryWindow = (): void => {}
@@ -149,12 +151,19 @@ async function serveShellAsset(request: Request): Promise<Response> {
 }
 
 async function main(): Promise<void> {
+  const configDirectory = desktopConfigDirectory(process.env, app.getPath('userData'))
   initializeShellLog(process.env.DSH_DESKTOP_LOG_DIR ?? defaultShellLogDirectory(process.env, app.getPath('userData')))
+  // Resolve the owned Harness home once: the profile paths below and the backend child must agree.
+  const resolvedHome = resolveDesktopHome(configDirectory, process.env)
+  writeShellLog(`Resolved DSH_HOME: ${resolvedHome.home}`)
+  writeShellLog(`Source: ${resolvedHome.source}`)
+  for (const warning of resolvedHome.warnings) writeShellLog(`Configuration warning: ${warning}`)
+  const hostEnvironment = desktopHostEnvironment(process.env, resolvedHome.home)
   const resources = runtimeResources()
-  const paths = resolveDesktopPaths()
+  const paths = resolveDesktopPaths(resolvedHome.home)
   const development = app.isPackaged ? undefined : join(app.getAppPath(), '.desktop-build', 'development', 'project')
   const activeProject = development ?? paths.profile
-  const manager = new DesktopProjectManager(paths, resources)
+  const manager = new DesktopProjectManager(paths, resources, hostEnvironment)
   profileRecoveryAvailable = () => development === undefined && manager.canRecoverProfile()
   let pageError: Extract<DesktopBackendState, { phase: 'error' }> | undefined
   let quitting = false
@@ -214,7 +223,7 @@ async function main(): Promise<void> {
     if (development === undefined) manager.assertProfileRuntime(activeProject)
     const hostInspectPort = developmentHostInspectPort(development !== undefined)
     const host = new DesktopHostProcess(resources.node, development ?? resources.dsh, activeProject,
-      hostInspectPort, process.env, onFailure)
+      hostInspectPort, hostEnvironment, onFailure)
     return {
       start: () => host.start(),
       stop: () => host.stop(),

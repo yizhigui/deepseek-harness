@@ -226,10 +226,12 @@ export class DesktopProjectManager {
   /**
    * @param paths - Electron-owned package state and reserved desktop profile paths.
    * @param runtime - absolute bundled Node.js and pnpm entry paths.
+   * @param environment - environment for package-manager children, carrying the resolved `DSH_HOME`.
    */
   constructor(
     readonly paths: DesktopPaths,
     readonly runtime: DesktopRuntimeExecutables,
+    private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
 
   /** Read the active desktop plugin inventory. */
@@ -437,7 +439,7 @@ export class DesktopProjectManager {
     }
     const npmrc = join(this.paths.pnpm.config, 'npmrc')
     if (!existsSync(npmrc)) writeFileSync(npmrc, '', { mode: 0o600 })
-    const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => (
+    const inherited = Object.fromEntries(Object.entries(this.environment).filter(([name]) => (
       name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
     )))
     writeFileSync(this.pendingPackages, '')
@@ -458,7 +460,7 @@ export class DesktopProjectManager {
           NPM_CONFIG_REGISTRY: DESKTOP_REGISTRY,
           NPM_CONFIG_STORE_DIR: this.paths.pnpm.store,
           NPM_CONFIG_USERCONFIG: npmrc,
-          PATH: `${dirname(this.runtime.node)}${delimiter}${process.env.PATH ?? ''}`,
+          PATH: `${dirname(this.runtime.node)}${delimiter}${this.environment.PATH ?? ''}`,
           PNPM_HOME: this.paths.pnpm.home,
           XDG_CACHE_HOME: this.paths.pnpm.cache,
           XDG_CONFIG_HOME: this.paths.pnpm.config,

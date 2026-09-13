@@ -50,6 +50,51 @@ pnpm --dir apps/desktop-portable exec node scripts/package-portable.mjs win-x64 
 `node_modules` in this directory links the workspace `electron-builder`, `app-builder-lib`, and
 `electron` exactly as `apps/desktop` resolves them, so no extra install step is required.
 
+## Shell configuration and the owned Harness home
+
+The shell resolves the Harness home it owns **before** it opens the profile or starts the backend,
+because `resolveDesktopPaths()` derives the Electron-owned profile and package-manager state from the
+same home the backend reads. Deriving that home twice would let the shell and its backend disagree
+about which profile they are using, so the shell resolves it once and pins it into the backend's
+child environment.
+
+Two shell-owned config locations exist under `%APPDATA%\DeepSeekHarness\`:
+
+| Path | Purpose |
+|---|---|
+| `desktop-config.json` | Optional. `{ "dshHome": "<absolute path>" }` |
+| `logs\desktop.log` | Startup, resolved-home, and backend lifecycle diagnostics |
+
+Precedence, highest first:
+
+1. an absolute `dshHome` in `desktop-config.json`;
+2. `DSH_HOME` inherited from the process that launched the application;
+3. the Harness default home, `~/.dsh`.
+
+Steps 2 and 3 are the Harness resolution itself — the shell calls `resolveDshHome` from
+`@deepseek-ai/dsh-home-paths`, the same helper `apps/desktop/src/paths.ts` and the Harness host use.
+The desktop config only adds the ability to outrank the environment, which is what makes the
+application independent of whatever launched it. Tilde forms such as `~/harness-home` are expanded by
+that same helper.
+
+Startup records the decision, so the active home is never a guess:
+
+```
+Resolved DSH_HOME: D:\example\harness-home
+Source: desktop-config
+```
+
+`Source` is `desktop-config`, `environment`, or `default`.
+
+Failure handling is deliberately non-fatal. A missing file keeps the previous behaviour. A file that
+is unreadable, invalid JSON, not a JSON object, or whose `dshHome` is empty, non-string, or relative is
+ignored with a `Configuration warning:` line in the log, and resolution continues to the next step. The
+application never refuses to start because of its own configuration.
+
+Only `DSH_HOME` is injected into the backend child environment, together with removal of the
+`HOME`/`HOMEDRIVE`/`HOMEPATH` overrides. No machine-level or user-level environment variable is read
+for writing, and none is written.
+
 ## Relationship to the official shell
 
 | Concern | Owner |
@@ -58,6 +103,7 @@ pnpm --dir apps/desktop-portable exec node scripts/package-portable.mjs win-x64 
 | Backend child-process lifecycle and readiness | `apps/desktop` (unchanged) |
 | Bundled Node.js, pnpm, and the production Harness tree | `apps/desktop` (unchanged) |
 | NSIS installer configuration | `apps/desktop` (unchanged) |
+| Harness-home resolution and the shell log | `apps/desktop/src/desktop-config.ts`, `logger.ts` |
 | Extra `portable` target, `dist-desktop/` output, builder cache location | this directory |
 
 `scripts/portable-targets.mjs` imports the official config factory
