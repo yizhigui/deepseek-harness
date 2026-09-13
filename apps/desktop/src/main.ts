@@ -22,6 +22,7 @@ import { claimDesktopSingleInstance } from './single-instance.ts'
 import { DesktopUpdateCoordinator } from './update-coordinator.ts'
 import { desktopErrorState } from './startup-error.ts'
 import { startupFailureDocument } from './startup-document.ts'
+import { initializeShellLog, writeShellLog, defaultShellLogDirectory } from './logger.ts'
 
 const SCHEME = 'dsh-app'
 let focusPrimaryWindow = (): void => {}
@@ -89,10 +90,10 @@ function developmentHostInspectPort(enabled: boolean): number | undefined {
 
 function createWindow(preload: string, show = false): BrowserWindow {
   const window = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 880,
-    minHeight: 600,
+    width: 1400,
+    height: 900,
+    minWidth: 1000,
+    minHeight: 700,
     show,
     webPreferences: {
       preload,
@@ -148,6 +149,7 @@ async function serveShellAsset(request: Request): Promise<Response> {
 }
 
 async function main(): Promise<void> {
+  initializeShellLog(process.env.DSH_DESKTOP_LOG_DIR ?? defaultShellLogDirectory(process.env, app.getPath('userData')))
   const resources = runtimeResources()
   const paths = resolveDesktopPaths()
   const development = app.isPackaged ? undefined : join(app.getAppPath(), '.desktop-build', 'development', 'project')
@@ -174,6 +176,7 @@ async function main(): Promise<void> {
     if (quitting || emergencyDocument) return
     emergencyDocument = true
     const diagnostic = desktopErrorState(error).message
+    writeShellLog(`fatal: ${diagnostic}`)
     pageError = { phase: 'error', message: diagnostic }
     if (mainWindow !== undefined) await showEmergencyDocument(mainWindow, diagnostic)
   }
@@ -195,7 +198,14 @@ async function main(): Promise<void> {
     const state = pageError ?? backend.state
     return state.phase === 'error' ? { ...state, profileRecovery: profileRecoveryAvailable() } : state
   }
+  let loggedBackendPhase: string | undefined
   const publishBackend = (state: DesktopBackendState): void => {
+    if (state.phase !== loggedBackendPhase) {
+      loggedBackendPhase = state.phase
+      writeShellLog(state.phase === 'error'
+        ? `backend ${state.phase}: ${state.message ?? 'unknown error'}`
+        : `backend ${state.phase}`)
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send(DESKTOP_IPC.backendState, state)
     }
@@ -487,6 +497,7 @@ async function main(): Promise<void> {
     if (shellInstallerOwnsQuit || quitting) return
     event.preventDefault()
     quitting = true
+    writeShellLog('stopping backend for application quit')
     void backend.close().catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
   })
 
@@ -507,6 +518,7 @@ const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimary
 
 if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error)
+  writeShellLog(`startup failed: ${error instanceof Error ? error.stack ?? message : message}`)
   console.error(error)
   const diagnosticFile = process.env.DSH_DESKTOP_DIAGNOSTIC_FILE
   if (diagnosticFile !== undefined) {

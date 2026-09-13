@@ -1,0 +1,11 @@
+{
+  "name": "@deepseek-ai/dsh-desktop-portable",
+  "description": "Additive electron-builder targets for the official DeepSeek Harness desktop shell",
+  "private": true,
+  "version": "0.1.5-rc.2",
+  "type": "module",
+  "scripts": {
+    "package:win:x64": "node scripts/package-portable.mjs win-x64",
+    "package:win:x64:portable": "node scripts/package-portable.mjs win-x64 --portable-only"
+  }
+}
