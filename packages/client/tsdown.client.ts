@@ -30,6 +30,21 @@ const INLINE_CSS_VIRTUAL_PREFIX = '\0dsh-inline-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 const INLINE_CSS_QUERY = '?inline'
 
+/** Give Rolldown a stable virtual id while retaining a reversible path to the physical stylesheet. */
+function stylesheetVirtualId(prefix: string, file: string): string {
+  const repositoryPath = relative(REPOSITORY_ROOT, file)
+  if (isAbsolute(repositoryPath) || repositoryPath === '..' || repositoryPath.startsWith(`..${sep}`)) {
+    throw new Error(`tsdown: stylesheet ${file} is outside the repository`)
+  }
+  return prefix + repositoryPath.split(sep).join('/') + CSS_VIRTUAL_SUFFIX
+}
+
+/** Resolve a stable stylesheet virtual id back to its physical repository file. */
+function stylesheetFileFromVirtualId(prefix: string, virtualId: string): string {
+  const repositoryPath = virtualId.slice(prefix.length, -CSS_VIRTUAL_SUFFIX.length)
+  return resolvePath(REPOSITORY_ROOT, ...repositoryPath.split('/'))
+}
+
 /** Emit one plugin-owned style injector and an optional CSS Modules export. */
 function styleInjectionModule(
   id: string,
@@ -503,11 +518,11 @@ function clientConfig(id: string, entry: string): UserConfig {
       resolveId(source: string, importer: string | undefined) {
         if (!source.endsWith('.module.css')) return null
         const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-        return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+        return stylesheetVirtualId(CSS_VIRTUAL_PREFIX, resolvePath(abs))
       },
       async load(virtualId: string) {
         if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-        const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+        const fileId = stylesheetFileFromVirtualId(CSS_VIRTUAL_PREFIX, virtualId)
         // The virtual id otherwise hides the physical stylesheet from Rolldown's watch graph.
         this.addWatchFile(fileId)
         const source = await readFile(fileId)
@@ -529,11 +544,11 @@ function clientConfig(id: string, entry: string): UserConfig {
         if (!source.endsWith(`.css${INLINE_CSS_QUERY}`)) return null
         const stylesheet = source.slice(0, -INLINE_CSS_QUERY.length)
         const abs = importer !== undefined ? sourceAssetPath(stylesheet, importer) : stylesheet
-        return INLINE_CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+        return stylesheetVirtualId(INLINE_CSS_VIRTUAL_PREFIX, resolvePath(abs))
       },
       async load(virtualId: string) {
         if (!virtualId.startsWith(INLINE_CSS_VIRTUAL_PREFIX)) return null
-        const fileId = virtualId.slice(INLINE_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+        const fileId = stylesheetFileFromVirtualId(INLINE_CSS_VIRTUAL_PREFIX, virtualId)
         this.addWatchFile(fileId)
         const source = await readFile(fileId)
         const { code } = transform({ filename: fileId, code: source, minify: true })
@@ -544,11 +559,11 @@ function clientConfig(id: string, entry: string): UserConfig {
       resolveId(source: string, importer: string | undefined) {
         if (!source.endsWith('.css') || source.endsWith('.module.css')) return null
         const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-        return GLOBAL_CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+        return stylesheetVirtualId(GLOBAL_CSS_VIRTUAL_PREFIX, resolvePath(abs))
       },
       async load(virtualId: string) {
         if (!virtualId.startsWith(GLOBAL_CSS_VIRTUAL_PREFIX)) return null
-        const fileId = virtualId.slice(GLOBAL_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+        const fileId = stylesheetFileFromVirtualId(GLOBAL_CSS_VIRTUAL_PREFIX, virtualId)
         this.addWatchFile(fileId)
         const source = await readFile(fileId)
         const { code } = transform({ filename: fileId, code: source, minify: true })

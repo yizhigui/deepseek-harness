@@ -30,6 +30,7 @@ dist-exe/
 /dist/
 # Windows desktop installers and the portable executable built by apps/desktop-portable.
 dist-desktop/
+/release-windows/
 apps/desktop/.desktop-build/
 python/sdk-runtime/src/deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-*
 python/sdk-runtime/src/deepseek_harness_runtime/runtime/node/

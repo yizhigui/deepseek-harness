@@ -1,5 +1,7 @@
 # DeepSeek Harness Desktop add-on targets
 
+English | [中文](README.zh.md)
+
 This directory holds **only additive desktop packaging code** for the official Electron desktop
 application that already lives in [`apps/desktop`](../desktop). It does not fork, copy, or replace
 the shell, the bundled runtime, or any Harness source.
