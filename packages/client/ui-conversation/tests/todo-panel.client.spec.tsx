@@ -100,6 +100,35 @@ describe('TodoPanel', () => {
     expect(screen.getByText('1 已完成')).toBeTruthy()
     expect(screen.queryByText(/进行中|待处理/)).toBeNull()
   })
+
+  it('follows a task through pending → running → completed, counting each state once', () => {
+    // The strip is the conversation-side surface of the shared reading; a task
+    // moving between buckets must leave the previous bucket, never appear in two.
+    const view = render(<TodoPanel todos={[
+      { content: '写组件', status: 'pending' },
+      { content: '补测试', status: 'pending' },
+    ]} t={t} />)
+    expect(screen.getByText('2 待处理')).toBeTruthy()
+
+    view.rerender(<TodoPanel todos={[
+      { content: '写组件', status: 'in_progress' },
+      { content: '补测试', status: 'pending' },
+    ]} t={t} />)
+    expect(screen.getByText('1 进行中 · 1 待处理')).toBeTruthy()
+
+    view.rerender(<TodoPanel todos={[
+      { content: '写组件', status: 'completed' },
+      { content: '补测试', status: 'pending' },
+    ]} t={t} />)
+    expect(screen.getByText('1 已完成 · 1 待处理')).toBeTruthy()
+
+    view.rerender(<TodoPanel todos={[
+      { content: '写组件', status: 'completed' },
+      { content: '补测试', status: 'completed' },
+    ]} t={t} />)
+    expect(screen.getByText('2 已完成')).toBeTruthy()
+    expect(screen.queryByText(/进行中|待处理/)).toBeNull()
+  })
 })
 
 /** Dock props stub: the adapter reads the 'todos' projection only; the rest of the owner share is unused. */

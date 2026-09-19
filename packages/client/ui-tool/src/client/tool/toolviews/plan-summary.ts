@@ -1,12 +1,18 @@
 /**
  * Pure plan derivation for the todo_write row's one-line summary. Several items
  * may be `in_progress` at once — parallel work runs concurrent tasks, so a
- * summary built from one active item would silently drop the rest. The plan
- * strip header derives its own counts inline and shares nothing with this, so
- * this stays inside the toolviews domain rather than in `contract/` (the
- * inter-domain face).
+ * summary built from one active item would silently drop the rest.
+ *
+ * The counts themselves are NOT derived here: `todoCounts` (ui-primitives) owns
+ * that reading, and the conversation plan strip renders from the same call, so a
+ * row and the strip beside it can never disagree about the collection they both
+ * describe. This module only decides which slice of that reading the row shows
+ * and which active item it names.
+ *
  * @module
  */
+
+import { todoCounts } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /**
  * One list item as the row sees it: unvalidated model JSON parsed from a call's
@@ -25,7 +31,11 @@ export interface PlanItemLike {
  * beside the truncatable text.
  */
 export interface PlanSummary {
+  /** Finished items, from the shared reading. */
   done: number
+  /** Items still to start, from the shared reading. */
+  pending: number
+  /** Every item in the collection, from the shared reading. */
   total: number
   /** First `in_progress` content, or null when that first item is unusable. */
   activeContent: string | null
@@ -45,15 +55,17 @@ export interface PlanSummary {
  * known to be good, and the active-item clause is the only part an unusable
  * name costs.
  * @param todos - the whole list, in model order.
- * @returns the done/total counts and the two summary halves.
+ * @returns the counts and the two summary halves.
  */
 export function planSummary(todos: readonly PlanItemLike[]): PlanSummary {
+  const counts = todoCounts(todos)
   const active = todos.filter(t => t.status === 'in_progress')
   const first = active[0]?.content
   const named = typeof first === 'string' && first.trim() !== ''
   return {
-    done: todos.filter(t => t.status === 'completed').length,
-    total: todos.length,
+    done: counts.completed,
+    pending: counts.pending,
+    total: counts.total,
     activeContent: named ? first : null,
     activeExtra: named ? active.length - 1 : 0,
   }

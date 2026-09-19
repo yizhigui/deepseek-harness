@@ -6,7 +6,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 // declare) and the payload type. Type-only by construction — the outlet is
 // free of host value imports, so no host Context merge enters this program.
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo/client'
-import { IconChecklistOutline14, IconChevronDownOutline14, IconChevronUpOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChecklistOutline14, IconChevronDownOutline14, IconChevronUpOutline14, todoCounts } from '@deepseek-ai/dsh-client-ui-primitives'
 import { NS } from '../locales.ts'
 import css from './TodoPanel.module.css'
 
@@ -73,9 +73,9 @@ function StatusGlyph({ status }: { status: TodoItem['status'] }) {
 
 /** Header summary: "·"-joined per-status counts; zero-count segments are omitted as noise (a non-empty list keeps at least one). */
 function progressLabel(todos: readonly TodoItem[], t: TodoPanelProps['t']): string {
-  const done = todos.filter(item => item.status === 'completed').length
-  const active = todos.filter(item => item.status === 'in_progress').length
-  const pending = todos.length - done - active
+  // The counts come from the shared derivation every task surface reads, so the
+  // strip can never disagree with the tool row about the same collection.
+  const { completed: done, inProgress: active, pending } = todoCounts(todos)
   // En spaces (U+2002): HTML collapses runs of ASCII spaces, so widening the
   // separator breathing room needs a literal wide space.
   return [
