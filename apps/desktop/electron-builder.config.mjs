@@ -62,6 +62,10 @@ export function createElectronBuilderConfig(
       'lib/*.js',
       'lib/*.cjs',
       'renderer/**/*',
+      // The system tray reads this icon at runtime; without it a packaged build
+      // has no notification-area image on disk.
+      'assets/icon.ico',
+      'assets/icon.png',
       'package.json',
     ],
     extraResources: [

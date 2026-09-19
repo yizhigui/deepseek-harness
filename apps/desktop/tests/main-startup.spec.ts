@@ -23,6 +23,7 @@ const harness = await vi.hoisted(async () => {
   let quitCompleted = deferred()
   class FakeWindow extends EventEmitter {
     destroyed = false
+    hidden = false
     readonly urls: string[] = []
     readonly webContents = Object.assign(new EventEmitter(), {
       setWindowOpenHandler: vi.fn(),
@@ -33,11 +34,13 @@ const harness = await vi.hoisted(async () => {
       }),
     })
     readonly show = vi.fn()
+    readonly hide = vi.fn(() => { this.hidden = true })
     readonly focus = vi.fn()
     readonly restore = vi.fn()
     constructor(readonly options: { show: boolean }) { super(); windows.push(this) }
     isDestroyed() { return this.destroyed }
     isMinimized() { return false }
+    isFocused() { return true }
     async loadURL(url: string) {
       this.urls.push(url)
       if (url === 'dsh-app://app/index.html') navigated.resolve()
@@ -68,6 +71,7 @@ const harness = await vi.hoisted(async () => {
     requestSingleInstanceLock: () => true,
     exit: vi.fn(),
     relaunch: vi.fn(),
+    setAppUserModelId: vi.fn(),
     quit: vi.fn(() => {
       const event = { preventDefault: vi.fn() }
       app.emit('before-quit', event)
@@ -77,6 +81,19 @@ const harness = await vi.hoisted(async () => {
   return {
     windows, hosts, handlers, app, FakeWindow, FakeHost,
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+    FakeTray: class {
+      static readonly instances: unknown[] = []
+      readonly setToolTip = vi.fn()
+      readonly setContextMenu = vi.fn()
+      readonly destroy = vi.fn()
+      on() { return this }
+    },
+    FakeNotification: class {
+      static isSupported() { return true }
+      on() { return this }
+      show() {}
+    },
+    nativeImage: { createFromPath: vi.fn(() => ({ isEmpty: () => true })) },
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
     assertProfileRuntime: vi.fn(),
     canRecoverProfile: vi.fn(() => true),
@@ -103,8 +120,13 @@ vi.mock('electron', () => ({
   ipcMain: {
     handle: (channel: string, handler: (event: { senderFrame: { url: string } }) => unknown) => { harness.handlers.set(channel, handler) },
   },
-  Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
+  Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn(() => []) },
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
+  shell: { showItemInFolder: vi.fn(), openPath: vi.fn(async () => '') },
+  Tray: harness.FakeTray,
+  Notification: harness.FakeNotification,
+  nativeImage: harness.nativeImage,
+  powerMonitor: { on: vi.fn() },
 }))
 vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
 vi.mock('../src/project-manager.ts', () => ({
@@ -350,8 +372,46 @@ describe('desktop main startup', () => {
     expect(harness.dialog.showErrorBox).not.toHaveBeenCalled()
   })
 
-  it('waits for a pending child to exit on quit without late window navigation', async () => {
+  it('hides the window on close instead of quitting, keeping the backend alive', async () => {
     await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    const window = harness.windows[0]!
+    const host = harness.hosts[0]!
+    // A real close delivers a cancellable event before the window is destroyed.
+    const event = { preventDefault: vi.fn() }
+    window.emit('close', event)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(window.hide).toHaveBeenCalledOnce()
+    expect(window.destroyed).toBe(false)
+    expect(harness.app.quit).not.toHaveBeenCalled()
+    // The Host child is untouched: background work keeps running.
+    expect(host.stop).not.toHaveBeenCalled()
+  })
+
+  it('lets a real quit close the window instead of hiding it', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    const window = harness.windows[0]!
+    const host = harness.hosts[0]!
+    // Entering application-quit mode stops the close policy from hiding.
+    window.emit('close', { preventDefault: vi.fn() })
+    harness.app.quit()
+    await host.stopping.promise
+    const event = { preventDefault: vi.fn() }
+    window.emit('close', event)
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    host.exited.resolve()
+  })
+
+  it('waits for a pending child to exit on quit without late window navigation', async () => {    await import('../src/main.ts')
     await harness.preparing.promise
     harness.prepared.resolve()
     await harness.hostStarted.promise
