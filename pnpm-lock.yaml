@@ -574,6 +574,9 @@ importers:
       '@deepseek-ai/dsh-launch-environment':
         specifier: workspace:^
         version: link:../../packages/util/launch-environment
+      '@deepseek-ai/dsh-native-command':
+        specifier: workspace:^
+        version: link:../../packages/util/native-command
       '@deepseek-ai/dsh-web-frontend':
         specifier: workspace:^
         version: link:../web

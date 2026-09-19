@@ -630,6 +630,9 @@ async function main(): Promise<void> {
     void backend.close().catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
   })
 
+  // The lifecycle object is built above, so this is never optional in production;
+  // the guard keeps a fatal-bootstrap window that never reached that point safe.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   desktopLifecycle?.setup()
   mainWindow = createMainWindow()
   await reconcileBackend().catch(() => undefined)
