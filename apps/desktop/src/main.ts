@@ -16,7 +16,7 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
-import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+import { assertPackageName, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from './project-manager.ts'
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
@@ -158,7 +158,9 @@ function assertDesktopSender(event: IpcMainInvokeEvent, hostnames: readonly stri
   if (senderFrame === null) throw new Error('dsh desktop: rejected IPC without a sender frame')
   const url = new URL(senderFrame.url)
   if (url.protocol !== `${SCHEME}:` || !hostnames.includes(url.hostname)) {
-    throw new Error('dsh desktop: rejected IPC from an unowned renderer')
+    const seen = `${url.protocol}//${url.hostname}`
+    const allowed = hostnames.join(', ')
+    throw new Error(`dsh desktop: rejected IPC from ${seen}; allowed: ${allowed}`)
   }
 }
 
@@ -426,8 +428,19 @@ async function main(): Promise<void> {
     return active.fetch(request)
   })
 
-  const mutate = async (event: IpcMainInvokeEvent, mutation: Parameters<DesktopProjectManager['mutate']>[0]): Promise<void> => {
-    assertDesktopSender(event, ['shell'])
+  /**
+   * Apply one plugin-package mutation through the desktop transaction.
+   * @param event - the invoking renderer, checked against `sendableBy`.
+   * @param mutation - the mutation to apply.
+   * @param sendableBy - documents allowed to request it: the shell's own
+   *   plugin-manager window, or the application document carrying the market.
+   */
+  const mutate = async (
+    event: IpcMainInvokeEvent,
+    mutation: Parameters<DesktopProjectManager['mutate']>[0],
+    sendableBy: readonly string[] = ['shell'],
+  ): Promise<void> => {
+    assertDesktopSender(event, sendableBy)
     if (development !== undefined) {
       throw new Error('dsh desktop: plugin package changes require a packaged application')
     }
@@ -470,6 +483,52 @@ async function main(): Promise<void> {
     return mutate(event, { type: 'plugin-toggle', name, enabled })
   })
   ipcMain.handle(DESKTOP_IPC.pluginsDisableAll, event => mutate(event, { type: 'plugins-disable-all' }))
+  // Plugin-market mutations. The market's own `/dsh-market/install` route is an
+  // HTTP mutation behind a same-origin check the application document cannot
+  // satisfy, and it would install with an externally provisioned pnpm. A desktop
+  // install must use this application's own package transaction instead, so the
+  // market UI reaches exactly these four calls.
+  ipcMain.handle(DESKTOP_IPC.marketInstall, async (event, source: unknown) => {
+    if (typeof source !== 'string') return { ok: false, error: 'plugin source must be a string' }
+    try {
+      // The same admission the shell's own add path uses: a registry package
+      // spec, never a command, never a local path, never an http/file spec.
+      packageNameFromSpec(source)
+      await mutate(event, { type: 'plugin-add', spec: source }, ['app'])
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.marketRemove, async (event, name: unknown) => {
+    if (typeof name !== 'string') return { ok: false, error: 'plugin name must be a string' }
+    try {
+      assertPackageName(name)
+      await mutate(event, { type: 'plugin-remove', name }, ['app'])
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.marketUpdate, async (event, name: unknown, version: unknown) => {
+    if (typeof name !== 'string' || typeof version !== 'string') {
+      return { ok: false, error: 'plugin name and version must be strings' }
+    }
+    try {
+      assertPackageName(name)
+      await mutate(event, { type: 'plugin-update', name, version }, ['app'])
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.marketInstalled, (event) => {
+    assertDesktopSender(event, ['app'])
+    if (development !== undefined) return []
+    return manager.listPlugins().map(plugin => ({
+      name: plugin.name, version: plugin.version, enabled: plugin.enabled,
+    }))
+  })
   ipcMain.handle(DESKTOP_IPC.backendStatus, (event) => {
     assertDesktopSender(event, ['shell'])
     return backendState()

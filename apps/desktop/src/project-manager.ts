@@ -113,7 +113,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function assertPackageName(name: string): void {
+/**
+ * Validate one bare plugin package name.
+ * @param name - npm package name, without a version or tag.
+ */
+export function assertPackageName(name: string): void {
   if (!PACKAGE_NAME_PATTERN.test(name)) throw new Error(`desktop project: invalid npm package name ${JSON.stringify(name)}`)
 }
 
