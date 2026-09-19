@@ -12,7 +12,9 @@ import { DESKTOP_IPC, type DshDesktopStartupApi } from '../src/ipc.ts'
 const electron = vi.hoisted(() => ({
   contextBridge: { exposeInMainWorld: vi.fn() },
   ipcRenderer: { invoke: vi.fn(), on: vi.fn(), off: vi.fn() },
-  webFrame: { executeJavaScript: vi.fn(() => Promise.resolve()) },
+  // Mirrors `webFrame.executeJavaScript(source)` so the recorded call keeps its
+  // source argument typed; a zero-parameter mock widens the call tuple to [].
+  webFrame: { executeJavaScript: vi.fn((_source: string) => Promise.resolve()) },
 }))
 vi.mock('electron', () => electron)
 
