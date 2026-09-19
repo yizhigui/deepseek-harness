@@ -41,7 +41,9 @@ function describe(value: unknown): string {
   }
   if (typeof value === 'string') return value
   try {
-    return JSON.stringify(value) ?? String(value)
+    // `JSON.stringify` returns a string for every input this accepts and throws for the
+    // circular case handled below, so no nullish fallback is reachable here.
+    return JSON.stringify(value)
   } catch {
     return String(value)
   }
