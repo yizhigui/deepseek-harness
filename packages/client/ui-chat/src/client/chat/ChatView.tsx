@@ -3,10 +3,10 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from 'react'
 import type {
-  ConversationTimelineSnapshot, RenderMessageImages,
+  RenderMessageImages,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
-import { Button, IconChevronDownOutline14, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutline14, Modal, turnActivity } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { PendingSteeringBubble, PendingSubmissionBubble } from './MessageItem.tsx'
@@ -156,15 +156,15 @@ function observedRpcIds(
   return observed
 }
 
-function runningTurnStartTime(timeline: ConversationTimelineSnapshot): number | null {
-  let latest: number | null = null
-  for (const turn of timeline.turns.values()) {
-    if (turn.status === 'open') latest = turn.start?.time ?? null
-  }
-  return latest
-}
-
-/** Turn-level model activity label retained across first-token, tool, and streaming phases. */
+/**
+ * Turn-level model activity label retained across first-token, tool, and streaming phases.
+ *
+ * Activity comes from {@link turnActivity}, one reading of both the Session
+ * running bit and the Conversation timeline's own open turn, and the label's
+ * clock is anchored to the timeline's `turn/start`. Reading one reading for both
+ * the label and its clock is what keeps this status from finishing before or
+ * after the transcript tail it describes.
+ */
 function TurnStatus({ startTime, t }: {
   /** The running turn's logged `turn/start` time; null falls back to mount
    *  time when that boundary is outside the window. */
@@ -299,7 +299,10 @@ export function ChatView({
     owner => renderSlot('conversation.message.images', { ...owner, loadImage }),
     [loadImage, renderSlot],
   )
-  const runningTurnStart = useMemo(() => runningTurnStartTime(timeline), [timeline])
+  // The loading status reads both the Session running bit and the Conversation
+  // timeline's open turn in one value, so the status, its clock, and the
+  // transcript tail it describes cannot disagree about whether the turn ended.
+  const turn = useMemo(() => turnActivity({ running }, timeline), [running, timeline])
 
   const listRef = useRef<HTMLDivElement | null>(null)
   const columnRef = useRef<HTMLDivElement | null>(null)
@@ -805,7 +808,7 @@ export function ChatView({
               double-render the same wait. */}
           {/* Turn-level loading signal: rides the whole running turn (first-token
               wait, tool execution, streaming) so it never flickers per step. */}
-          {running && <TurnStatus startTime={runningTurnStart} t={t} />}
+          {turn.active && <TurnStatus startTime={turn.startTime} t={t} />}
           {pendingSteering.map(item => (
             <PendingSteeringBubble
               key={item.id}
