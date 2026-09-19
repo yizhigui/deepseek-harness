@@ -27,9 +27,13 @@ export function writePackage(modules: string, name: string, fields: Record<strin
  * @param root - New runtime directory.
  * @param version - Shell and dsh version.
  * @param nodeVersion - Bundled Node version used for native rebuild selection.
+ * @param sharedNames - Additional release-owned packages materialized by the caller
+ *   before this call, so their own manifest versions enter the shared inventory.
  * @returns Sealed runtime metadata.
  */
-export function runtimeFixture(root: string, version = '1.0.0', nodeVersion = '24.17.0'): DesktopRuntimeDescriptor {
+export function runtimeFixture(
+  root: string, version = '1.0.0', nodeVersion = '24.17.0', sharedNames: readonly string[] = [],
+): DesktopRuntimeDescriptor {
   const names = ['@deepseek-ai/dsh', '@deepseek-ai/dsh-desktop-host', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@deepseek-ai/cordis']
   for (const name of names) writePackage(join(root, 'node_modules'), name, { version })
   for (const file of DESKTOP_HOST_RUNTIME_FILES) {
@@ -38,5 +42,5 @@ export function runtimeFixture(root: string, version = '1.0.0', nodeVersion = '2
     writeFileSync(path, '')
   }
   writeFileSync(join(root, 'package.json'), '{"type":"module"}\n')
-  return writeDesktopRuntime(root, { schemaVersion: 1, version, nodeVersion, pnpmVersion: '11.7.0', hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION }, names)
+  return writeDesktopRuntime(root, { schemaVersion: 1, version, nodeVersion, pnpmVersion: '11.7.0', hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION }, [...names, ...sharedNames])
 }

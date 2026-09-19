@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { satisfies } from 'semver'
+import { prerelease, satisfies } from 'semver'
 import { desktopRuntimeId, runtimePath, type DesktopRuntimeDescriptor } from './runtime-tree.ts'
 
 /** Applied runtime identity and the only links Desktop may replace. */
@@ -129,8 +129,7 @@ interface PackageManifest {
   readonly optionalPeers: ReadonlySet<string>
 }
 
-function manifest(path: string): PackageManifest {
-  const value: unknown = JSON.parse(readFileSync(join(path, 'package.json'), 'utf8'))
+function manifest(path: string): PackageManifest {  const value: unknown = JSON.parse(readFileSync(join(path, 'package.json'), 'utf8'))
   if (!record(value) || typeof value.name !== 'string' || typeof value.version !== 'string') {
     throw new Error(`desktop profile: invalid package manifest ${path}`)
   }
@@ -150,6 +149,31 @@ function manifest(path: string): PackageManifest {
   }
   return { name: value.name, version: value.version, dependencies: dependencies('dependencies'),
     optionalDependencies: dependencies('optionalDependencies'), peerDependencies: dependencies('peerDependencies'), optionalPeers }
+}
+
+/**
+ * Test one peer range with the prerelease gate the published range already implies.
+ *
+ * Semver's default comparison refuses every prerelease version unless the range
+ * happens to spell a prerelease with the same `major.minor.patch` tuple. A peer
+ * range that DOES name prereleases (`^0.1.2-alpha.2`) therefore still rejects a
+ * newer prerelease of the same line — here the workspace's own
+ * `@deepseek-ai/dsh-settings@0.1.5-rc.2` against dshmarket's
+ * `^0.1.0-rc.7 || ^0.1.1-rc.2 || ^0.1.2-alpha.2`. That rejection is an artifact
+ * of the default gate, not of the range: a prerelease range member is the
+ * author's explicit statement about which development line this plugin tracks,
+ * and npm resolves prereleases inside exactly that line the same way.
+ *
+ * `includePrerelease: true` widens ONLY those prerelease candidates; a stable
+ * version is never re-tested (the option is passed only when the candidate is
+ * itself a prerelease), and the widened comparison keeps every ordinary
+ * semver rule, so `0.2.0` and `1.0.0` stay incompatible with a `0.1.x` range.
+ * @param version - Installed candidate version.
+ * @param range - Declared peer range.
+ * @returns Whether the installed package satisfies the declared peer range.
+ */
+function satisfiesPeer(version: string, range: string): boolean {
+  return satisfies(version, range, prerelease(version) === null ? undefined : { includePrerelease: true })
 }
 
 function packageFrom(anchor: string, name: string): string | undefined {
@@ -224,7 +248,7 @@ export function validateDesktopPluginGraph(
         throw new Error(`desktop profile: ${chain} resolves ${name} outside its owned packages`)
       }
       const dependency = manifest(target)
-      if (peer && !satisfies(dependency.version, range)) {
+      if (peer && !satisfiesPeer(dependency.version, range)) {
         throw new Error(`desktop profile: ${chain} requires ${name}@${range}, found ${dependency.version}`)
       }
       if (host === undefined) visit(target, `${chain} -> ${name}`)
