@@ -23,9 +23,10 @@ afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); vi.resetModules() }
 it('gives the startup document controls, not the market bridge', async () => {
   vi.stubGlobal('location', new URL('dsh-app://shell/startup.html'))
   await import('../src/preload-app.ts')
-  const calls = electron.contextBridge.exposeInMainWorld.mock.calls
-  const names = calls.map(call => call[0])
-  expect(names).toEqual(['dshDesktop'])
+  // The mock's call list carries `any`, so narrow it once at the boundary: the
+  // recorded arguments are asserted below, not returned.
+  const calls = electron.contextBridge.exposeInMainWorld.mock.calls as unknown[][]
+  expect(calls.map(call => call[0])).toEqual(['dshDesktop'])
   const api = calls[0]?.[1] as DshDesktopStartupApi
   await api.locale()
   await api.backend.status()
@@ -50,9 +51,11 @@ it('gives the startup document controls, not the market bridge', async () => {
 it('gives the application document the market bridge and no startup controls', async () => {
   vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
   await import('../src/preload-app.ts')
-  const calls = electron.contextBridge.exposeInMainWorld.mock.calls
+  // The mock's call list carries `any`, so narrow it once at the boundary: the
+  // recorded arguments are asserted below, not returned.
+  const calls = electron.contextBridge.exposeInMainWorld.mock.calls as unknown[][]
   expect(calls.map(call => call[0])).toEqual(['dshDesktop', '__dshMarketBridge'])
-  expect(calls[0]?.[1]).toEqual({ protocolVersion: 1, market: expect.any(Object) })
+  expect(calls[0]?.[1]).toEqual({ protocolVersion: 1, market: expect.any(Object) as unknown })
   const bridge = calls[1]?.[1] as {
     install(source: string): Promise<unknown>
     remove(name: string): Promise<unknown>

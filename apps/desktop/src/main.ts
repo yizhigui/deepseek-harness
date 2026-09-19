@@ -323,8 +323,10 @@ async function main(): Promise<void> {
   const publishBackend = (state: DesktopBackendState): void => {
     if (state.phase !== loggedBackendPhase) {
       loggedBackendPhase = state.phase
+      // The error variant types `message` as a non-empty string, so no fallback
+      // is reachable; the discriminant already narrowed the state here.
       writeShellLog(state.phase === 'error'
-        ? `backend ${state.phase}: ${state.message ?? 'unknown error'}`
+        ? `backend ${state.phase}: ${state.message}`
         : `backend ${state.phase}`)
     }
     for (const window of BrowserWindow.getAllWindows()) {

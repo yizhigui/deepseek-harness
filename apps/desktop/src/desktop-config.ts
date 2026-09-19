@@ -26,9 +26,8 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { desktopConfigDirectory } from './config-directory.ts'
 
-/** File name of the desktop configuration inside {@link desktopConfigDirectory}. */
+/** File name of the desktop configuration inside the shell's `%APPDATA%\DeepSeekHarness` directory. */
 export const DESKTOP_CONFIG_FILENAME = 'desktop-config.json'
 
 /** Which input decided the resolved Harness home. */
