@@ -479,6 +479,10 @@ export class DesktopProjectManager {
       return new DesktopProjectMutationError(reason.message, true, failure)
     }
     try {
+      // The marker goes first when the package directories are part of the
+      // restore: whatever happens next, the next startup rebuilds the links from
+      // the lockfile this restore is about to put back.
+      if (packagesChanged && snapshot.lockfile !== undefined) writeFileSync(this.pendingPackages, '')
       restoreProfileSnapshot(projectDir, snapshot)
       if (packagesChanged) await this.restorePackages(projectDir, snapshot)
       else {
@@ -515,9 +519,8 @@ export class DesktopProjectManager {
       return
     }
     // Reinstall from the restored lockfile through the same pending path a runtime
-    // change uses: a frozen install rebuilds every link, and the marker stays
-    // behind if that install fails, so startup recovery retries it.
-    writeFileSync(this.pendingPackages, '')
+    // change uses: a frozen install rebuilds every link, and the marker the caller
+    // already wrote stays behind if that install fails, so startup recovery retries it.
     await this.runPnpm(projectDir, ['install', '--frozen-lockfile', '--ignore-scripts'])
     await this.finishPackageOperation(projectDir)
   }
