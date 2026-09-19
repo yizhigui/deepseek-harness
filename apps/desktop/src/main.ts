@@ -16,7 +16,7 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
-import { assertPackageName, DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+import { assertPackageName, DesktopProjectManager, DesktopProjectMutationError, type DesktopProjectHooks } from './project-manager.ts'
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
@@ -432,6 +432,24 @@ async function main(): Promise<void> {
   })
 
   /**
+   * Report a plugin failure whose transaction already restored the profile.
+   *
+   * The market's own document is replaced while the transaction runs, so its
+   * result never reaches a renderer: the shell states this outcome itself. The
+   * plugin-manager window survives the mutation and shows the rejection inline.
+   * @param error - Restored mutation failure carrying the plugin's own message.
+   */
+  const reportPluginFailure = async (error: DesktopProjectMutationError): Promise<void> => {
+    writeShellLog(`plugin change failed and the profile was restored: ${error.message}`)
+    await dialog.showMessageBox({
+      type: 'error',
+      title: messages.pluginFailureTitle,
+      message: error.message,
+      detail: messages.pluginProfileRestored,
+    })
+  }
+
+  /**
    * Apply one plugin-package mutation through the desktop transaction.
    * @param event - the invoking renderer, checked against `sendableBy`.
    * @param mutation - the mutation to apply.
@@ -454,6 +472,19 @@ async function main(): Promise<void> {
       await manager.mutate(mutation, hooks)
       await navigateMain(applicationUrl)
     } catch (error) {
+      // A restored failure belongs to the plugin, not to the profile: the
+      // application is still the one that started, so bring it back and report
+      // the plugin's own error instead of turning it into a startup failure.
+      if (error instanceof DesktopProjectMutationError && error.restored) {
+        try {
+          await reconcileBackend()
+        } catch (recovery) {
+          await showStartupError(new AggregateError([error, recovery], error.message))
+          throw error
+        }
+        if (sendableBy.includes('app')) await reportPluginFailure(error)
+        throw error
+      }
       await showStartupError(error)
       throw error
     }

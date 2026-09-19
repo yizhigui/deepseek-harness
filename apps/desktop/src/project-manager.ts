@@ -84,9 +84,88 @@ const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*|
 const VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+_-]*$/u
 const MAX_PNPM_DIAGNOSTIC_BYTES = 64 * 1024
 const DESKTOP_REGISTRY = 'https://registry.npmjs.org/'
+/** Marker the profile carries while a package-manager operation is unfinished. */
+const PENDING_PACKAGES = 'desktop-packages-pending'
+
+/** Profile bytes one transaction restores when it fails after touching them. */
+interface DesktopProfileSnapshot {
+  readonly manifest: Buffer
+  readonly lockfile: Buffer | undefined
+}
+
+/**
+ * Failure of one profile mutation.
+ *
+ * `restored` reports whether the transaction put every profile file back the way
+ * it was before the mutation. True means the failure belongs to the requested
+ * plugin change and the profile is still the working one; false means the profile
+ * could not be restored and the application must treat it as damaged.
+ */
+export class DesktopProjectMutationError extends Error {
+  /**
+   * @param message - Failure text for the user; a restored failure keeps the plugin's own message.
+   * @param restored - Whether the pre-mutation profile is in place.
+   * @param cause - Original failure that triggered the restore.
+   */
+  constructor(message: string, readonly restored: boolean, cause?: unknown) {
+    super(message)
+    this.name = 'DesktopProjectMutationError'
+    if (cause !== undefined) this.cause = cause
+  }
+}
 
 function errorOf(reason: unknown, fallback: string): Error {
   return reason instanceof Error ? reason : new Error(fallback)
+}
+
+/**
+ * Capture the two files that define the profile's package graph.
+ * @param projectDir - Desktop profile directory.
+ * @returns Manifest and lockfile bytes, with the missing-lockfile case kept distinct.
+ */
+function profileSnapshot(projectDir: string): DesktopProfileSnapshot {
+  const lockfile = join(projectDir, 'pnpm-lock.yaml')
+  return {
+    manifest: readFileSync(join(projectDir, 'package.json')),
+    lockfile: existsSync(lockfile) ? readFileSync(lockfile) : undefined,
+  }
+}
+
+/**
+ * Report whether a failed operation changed anything a snapshot covers.
+ *
+ * The rebuild marker is written before pnpm spawns, so a marker this operation
+ * introduced proves pnpm reached the package directories even when pnpm failed
+ * before rewriting the manifest.
+ * @param projectDir - Desktop profile directory.
+ * @param snapshot - Bytes captured before the operation.
+ * @param markedBefore - Whether the rebuild marker was already present.
+ * @returns Whether the profile drifted from the snapshot.
+ */
+function profileDrifted(projectDir: string, snapshot: DesktopProfileSnapshot, markedBefore: boolean): boolean {
+  if (!snapshot.manifest.equals(readFileSync(join(projectDir, 'package.json')))) return true
+  const lockfile = join(projectDir, 'pnpm-lock.yaml')
+  const current = existsSync(lockfile) ? readFileSync(lockfile) : undefined
+  if (snapshot.lockfile === undefined ? current !== undefined : current === undefined || !snapshot.lockfile.equals(current)) {
+    return true
+  }
+  return !markedBefore && existsSync(join(projectDir, PENDING_PACKAGES))
+}
+
+/**
+ * Write the captured profile bytes back.
+ *
+ * The lockfile goes first: the rebuild marker lets startup recovery redo the
+ * links from it, so a manifest written last can never pair with the wrong graph.
+ * @param projectDir - Desktop profile directory.
+ * @param snapshot - Bytes captured before the operation.
+ */
+function restoreProfileSnapshot(projectDir: string, snapshot: DesktopProfileSnapshot): void {
+  const lockfile = join(projectDir, 'pnpm-lock.yaml')
+  if (snapshot.lockfile === undefined) {
+    if (existsSync(lockfile)) unlinkSync(lockfile)
+  } else writeFileSync(lockfile, snapshot.lockfile, { mode: 0o600 })
+  writeFileSync(join(projectDir, 'package.json'), snapshot.manifest, { mode: 0o600 })
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -222,7 +301,7 @@ function inspectPlugin(projectDir: string, requestedName: string): DesktopPlugin
   return { name: requestedName, version: manifest.version, enabled: profilePluginNames(projectDir).includes(requestedName) }
 }
 
-/** Desktop npm project manager with direct writes and no rollback. */
+/** Desktop npm project manager: one profile transaction at a time, rolling a failed change back. */
 export class DesktopProjectManager {
   private lockDescriptor: number | undefined
   private descriptor: DesktopRuntimeDescriptor | undefined
@@ -290,7 +369,7 @@ export class DesktopProjectManager {
     return this.descriptor !== undefined && existsSync(this.runtime.node) && existsSync(this.runtime.dsh)
   }
 
-  private get pendingPackages(): string { return join(this.paths.profile, 'desktop-packages-pending') }
+  private get pendingPackages(): string { return join(this.paths.profile, PENDING_PACKAGES) }
 
   private currentRuntime(): DesktopRuntimeDescriptor {
     if (this.descriptor === undefined) throw new Error('desktop project: runtime metadata has not been loaded')
@@ -328,19 +407,36 @@ export class DesktopProjectManager {
     })
   }
 
-  /** Modify the current profile while its backend is stopped; failures retain partial changes. */
+  /**
+   * Modify the current profile while its backend is stopped.
+   *
+   * The profile is one transaction. When any step after the first profile write
+   * fails — pnpm, plugin inspection, bundle registration, peer or graph
+   * validation, host relinking — the pre-mutation profile goes back, so a failed
+   * install never leaves a half-installed profile behind. The backend restart
+   * that follows a successful change stays outside the transaction: its failure
+   * keeps the new, already valid profile.
+   * @param mutation - Dependency or activation change to apply.
+   * @param hooks - Stop the Host before profile writes; restart it after success.
+   */
   async mutate(mutation: DesktopProjectMutation, hooks: DesktopProjectHooks): Promise<void> {
     await this.withLock(async () => {
       this.currentRuntime()
       if (!existsSync(this.paths.profile)) throw new Error('desktop project: active profile is not installed')
       await hooks.beforeChange()
+      const snapshot = profileSnapshot(this.paths.profile)
+      const markedBefore = existsSync(this.pendingPackages)
       if (mutation.type === 'plugins-disable-all') {
-        const manifest = projectManifest(this.paths.profile)
-        writeJson(join(this.paths.profile, 'package.json'), {
-          ...manifest,
-          dsh: { ...manifest.dsh, profile: { ...manifest.dsh.profile, bundles: [...DESKTOP_PROFILE_BUNDLES] } },
-        })
-        this.prepareProfile(this.paths.profile)
+        try {
+          const manifest = projectManifest(this.paths.profile)
+          writeJson(join(this.paths.profile, 'package.json'), {
+            ...manifest,
+            dsh: { ...manifest.dsh, profile: { ...manifest.dsh.profile, bundles: [...DESKTOP_PROFILE_BUNDLES] } },
+          })
+          this.prepareProfile(this.paths.profile)
+        } catch (error) {
+          throw await this.restoreFailure(this.paths.profile, snapshot, false, markedBefore, error)
+        }
         await hooks.afterChange()
         return
       }
@@ -348,13 +444,82 @@ export class DesktopProjectManager {
       const packagesChanged = mutation.type !== 'plugin-toggle'
       if (packagesChanged) unlinkDesktopHostPackages(this.paths.profile)
       try {
-        await this.applyMutation(this.paths.profile, mutation)
-      } finally {
-        if (packagesChanged) linkDesktopHostPackages(this.paths.profile, this.runtime.dsh, this.currentRuntime())
+        try {
+          await this.applyMutation(this.paths.profile, mutation)
+        } finally {
+          if (packagesChanged) linkDesktopHostPackages(this.paths.profile, this.runtime.dsh, this.currentRuntime())
+        }
+        await this.reconcileProfile(this.paths.profile, previous, packagesChanged)
+      } catch (error) {
+        throw await this.restoreFailure(this.paths.profile, snapshot, packagesChanged, markedBefore, error)
       }
-      await this.reconcileProfile(this.paths.profile, previous, packagesChanged)
       await hooks.afterChange()
     })
+  }
+
+  /**
+   * Put a profile back the way it was before a mutation that failed.
+   * @param projectDir - Profile the failed mutation may have changed.
+   * @param snapshot - Manifest and lockfile bytes captured before the mutation.
+   * @param packagesChanged - Whether the mutation owned package directories.
+   * @param markedBefore - Whether the rebuild marker was already present.
+   * @param failure - Failure that triggered the restore.
+   * @returns The failure to report, carrying the profile outcome; never throws,
+   *   so the caller's own `throw` states what leaves the transaction.
+   */
+  private async restoreFailure(
+    projectDir: string, snapshot: DesktopProfileSnapshot, packagesChanged: boolean,
+    markedBefore: boolean, failure: unknown,
+  ): Promise<DesktopProjectMutationError> {
+    const reason = errorOf(failure, 'desktop project: package transaction failed')
+    // A rejection that never reached a profile write — an unsupported spec, a
+    // reserved host package, a plugin that is not installed — changed nothing, so
+    // there is no drift to undo and no reason to touch node_modules.
+    if (!profileDrifted(projectDir, snapshot, markedBefore)) {
+      return new DesktopProjectMutationError(reason.message, true, failure)
+    }
+    try {
+      restoreProfileSnapshot(projectDir, snapshot)
+      if (packagesChanged) await this.restorePackages(projectDir, snapshot)
+      else {
+        // Activation and bundle-list changes own no package directories: the
+        // restored manifest is the whole profile again.
+        this.prepareProfile(projectDir)
+      }
+    } catch (error) {
+      return new DesktopProjectMutationError(
+        `${reason.message} (the desktop profile could not be restored: ${errorOf(error, 'unknown recovery failure').message})`,
+        false,
+        failure,
+      )
+    }
+    return new DesktopProjectMutationError(reason.message, true, failure)
+  }
+
+  /**
+   * Reproduce the pre-mutation package directories from the restored lockfile.
+   * @param projectDir - Profile whose manifest and lockfile are already restored.
+   * @param snapshot - Bytes captured before the mutation.
+   */
+  private async restorePackages(projectDir: string, snapshot: DesktopProfileSnapshot): Promise<void> {
+    // The whole package directory goes, without consulting the recorded links
+    // first: the failed operation may have left packages the old lockfile never
+    // named, or replaced a runtime link with a real directory, and removing the
+    // tree unlinks nested links without visiting their targets either way.
+    removeOwnedDirectory(join(projectDir, 'node_modules'))
+    if (snapshot.lockfile === undefined) {
+      // The pre-mutation profile owned no lockfile, so its node_modules only ever
+      // held host links: relinking is the whole restore, with no manager run.
+      if (existsSync(this.pendingPackages)) unlinkSync(this.pendingPackages)
+      this.prepareProfile(projectDir)
+      return
+    }
+    // Reinstall from the restored lockfile through the same pending path a runtime
+    // change uses: a frozen install rebuilds every link, and the marker stays
+    // behind if that install fails, so startup recovery retries it.
+    writeFileSync(this.pendingPackages, '')
+    await this.runPnpm(projectDir, ['install', '--frozen-lockfile', '--ignore-scripts'])
+    await this.finishPackageOperation(projectDir)
   }
 
   private async reconcileProfile(projectDir: string, previous: DesktopProfileState | undefined, packagesChanged = false): Promise<void> {

@@ -15,6 +15,7 @@ const harness = await vi.hoisted(async () => {
   const hosts: FakeHost[] = []
   const handlers = new Map<string, (event: { senderFrame: { url: string } }) => unknown>()
   let pluginsEnabled = false
+  let mutationFailure: Error | undefined
   let preparing = deferred()
   let prepared = deferred()
   let hostStarted = deferred()
@@ -94,6 +95,15 @@ const harness = await vi.hoisted(async () => {
       show() {}
     },
     nativeImage: { createFromPath: vi.fn(() => ({ isEmpty: () => true })) },
+    /** Failure the mocked transaction reports next, or undefined to succeed. */
+    DesktopProjectMutationError: class DesktopProjectMutationError extends Error {
+      readonly restored: boolean
+      constructor(message: string, restored: boolean) {
+        super(message)
+        this.name = 'DesktopProjectMutationError'
+        this.restored = restored
+      }
+    },
     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
     assertProfileRuntime: vi.fn(),
     canRecoverProfile: vi.fn(() => true),
@@ -103,10 +113,13 @@ const harness = await vi.hoisted(async () => {
     nextHostStart() { hostStarted = deferred(); return hostStarted.promise },
     get pluginsEnabled() { return pluginsEnabled },
     set pluginsEnabled(value: boolean) { pluginsEnabled = value },
+    get mutationFailure() { return mutationFailure },
+    set mutationFailure(value: Error | undefined) { mutationFailure = value },
     reset() {
       windows.length = 0; hosts.length = 0; handlers.clear(); app.removeAllListeners()
       app.isPackaged = true
       pluginsEnabled = false
+      mutationFailure = undefined
       preparing = deferred(); prepared = deferred(); hostStarted = deferred()
       navigated = deferred(); errorPublished = deferred(); quitCompleted = deferred()
     },
@@ -130,12 +143,14 @@ vi.mock('electron', () => ({
 }))
 vi.mock('../src/paths.ts', () => ({ resolveDesktopPaths: () => ({ profile: 'desktop-test-profile' }) }))
 vi.mock('../src/project-manager.ts', () => ({
+  DesktopProjectMutationError: harness.DesktopProjectMutationError,
   DesktopProjectManager: class {
     readonly applyRelease = harness.applyRelease
     readonly assertProfileRuntime = harness.assertProfileRuntime
     canRecoverProfile = harness.canRecoverProfile
     async mutate(_mutation: unknown, hooks: { beforeChange(): Promise<void>; afterChange(): Promise<void> }) {
       await hooks.beforeChange()
+      if (harness.mutationFailure !== undefined) throw harness.mutationFailure
       harness.pluginsEnabled = false
       await hooks.afterChange()
     }
@@ -144,13 +159,19 @@ vi.mock('../src/project-manager.ts', () => ({
     }
   },
 }))
+// The market's install resolver reads the published catalog over the network; these
+// specs exercise the desktop transaction boundary, so the admission itself is mocked.
+vi.mock('../src/market-source.ts', () => ({
+  createMarketInstallResolver: () => async () => ({ ok: true, spec: 'plugin@1.0.0' }),
+  loadMarketRegistry: vi.fn(),
+}))
 vi.mock('../src/host-process.ts', () => ({ DesktopHostProcess: harness.FakeHost }))
 vi.mock('../src/update-coordinator.ts', () => ({ DesktopUpdateCoordinator: vi.fn() }))
 
-function invoke(channel: string): unknown {
+function invoke(channel: string, url = 'dsh-app://shell/startup.html', ...args: unknown[]): unknown {
   const handler = harness.handlers.get(channel)
   if (handler === undefined) throw new Error(`missing handler ${channel}`)
-  return handler({ senderFrame: { url: 'dsh-app://shell/startup.html' } })
+  return (handler as (event: unknown, ...rest: unknown[]) => unknown)({ senderFrame: { url } }, ...args)
 }
 
 beforeEach(() => {
@@ -289,6 +310,73 @@ describe('desktop main startup', () => {
     await recovery
     expect(harness.windows).toHaveLength(1)
     expect(invoke(DESKTOP_IPC.backendStatus)).toEqual({ phase: 'ready' })
+  })
+
+  it('brings the application back when a market install fails and the profile is restored', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    harness.mutationFailure = new harness.DesktopProjectMutationError('plugin requires missing react@^18.2.0', true)
+    const started = harness.nextHostStart()
+    const install = Promise.resolve(invoke(
+      DESKTOP_IPC.marketInstall, 'dsh-app://app/index.html', 'https://github.com/owner/repo/tree/main/packages/plugin',
+    ))
+    await harness.hosts[0]!.stopping.promise
+    harness.hosts[0]!.exited.resolve()
+    await started
+    harness.hosts[1]!.ready.resolve()
+    // The restarted backend serves the application document the market lives in.
+    await expect(install).resolves.toEqual({ ok: false, error: 'plugin requires missing react@^18.2.0' })
+    expect(invoke(DESKTOP_IPC.backendStatus)).toEqual({ phase: 'ready' })
+    expect(harness.windows[0]!.urls.at(-1)).toBe('dsh-app://app/index.html')
+    // The market's own document is replaced while the transaction runs, so the
+    // shell states the plugin's failure itself.
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      message: 'plugin requires missing react@^18.2.0',
+    }))
+  })
+
+  it('restarts the application after a restored shell plugin failure without a dialog', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    harness.mutationFailure = new harness.DesktopProjectMutationError('plugin requires missing react@^18.2.0', true)
+    const started = harness.nextHostStart()
+    const add = Promise.resolve(invoke(DESKTOP_IPC.pluginsAdd, 'dsh-app://shell/plugin-manager.html', 'plugin@1.0.0'))
+    await harness.hosts[0]!.stopping.promise
+    harness.hosts[0]!.exited.resolve()
+    await started
+    harness.hosts[1]!.ready.resolve()
+    // The plugin-manager window survives the mutation and shows this rejection itself.
+    await expect(add).rejects.toThrow('plugin requires missing react@^18.2.0')
+    expect(invoke(DESKTOP_IPC.backendStatus)).toEqual({ phase: 'ready' })
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+  })
+
+  it('reports a startup failure when a plugin change could not be restored', async () => {
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await harness.navigated.promise
+    harness.mutationFailure = new harness.DesktopProjectMutationError('plugin requires missing react@^18.2.0 (the desktop profile could not be restored)', false)
+    const add = Promise.resolve(invoke(DESKTOP_IPC.pluginsAdd, 'dsh-app://shell/plugin-manager.html', 'plugin@1.0.0'))
+    await harness.hosts[0]!.stopping.promise
+    harness.hosts[0]!.exited.resolve()
+    await harness.errorPublished.promise
+    await expect(add).rejects.toThrow('could not be restored')
+    expect(harness.hosts).toHaveLength(1)
+    expect(invoke(DESKTOP_IPC.backendStatus)).toMatchObject({ phase: 'error', profileRecovery: true })
+    expect(harness.windows[0]!.urls.at(-1)).toBe('dsh-app://shell/startup.html')
+    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
   })
 
   it('waits for Host exit before relaunching the application', async () => {
