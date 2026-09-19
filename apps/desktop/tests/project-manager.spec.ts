@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resolveDesktopPaths } from '../src/paths.ts'
-import { DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
+import { DesktopProjectManager, DesktopProjectMutationError, packageNameFromSpec, type DesktopProjectHooks } from '../src/project-manager.ts'
 import { runtimeFixture } from './runtime-fixture.ts'
 
 const roots: string[] = []
@@ -14,9 +14,8 @@ function temporaryRoot(): string {
   roots.push(root)
   return root
 }
-function writeFakePnpm(root: string): string {
-  const path = join(root, 'pnpm.mjs')
-  writeFileSync(path, `
+function fakePnpmSource(root: string, peers: Readonly<Record<string, string>>, addPeers?: Readonly<Record<string, string>>): string {
+  return `
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 const args = process.argv.slice(2)
@@ -39,10 +38,49 @@ if (command !== 'rebuild') {
     const packageRoot = join(project, 'node_modules', name)
     mkdirSync(packageRoot, { recursive: true })
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({name, version,
-      peerDependencies: {'@deepseek-ai/cordis': '^1.0.0'}, dsh: {bundle: {patch: './bundle.yml'}}}))
+      peerDependencies: command === 'add' ? ${JSON.stringify(addPeers ?? peers)} : ${JSON.stringify(peers)}, dsh: {bundle: {patch: './bundle.yml'}}}))
     writeFileSync(join(packageRoot, 'bundle.yml'), '[]\\n')
   }
   writeFileSync(join(project, 'pnpm-lock.yaml'), JSON.stringify(manifest.dependencies))
+}
+`
+}
+function writeFakePnpm(root: string): string {
+  const path = join(root, 'pnpm.mjs')
+  writeFileSync(path, fakePnpmSource(root, { '@deepseek-ai/cordis': '^1.0.0' }))
+  return path
+}
+/**
+ * A pnpm whose `add` installs a plugin demanding a peer the profile cannot provide.
+ *
+ * The shape is dsh-web-all's: pnpm succeeds, the plugin lands, and the graph check
+ * then refuses it because the profile provides no such package. The peer is a
+ * fixture-only name because a test host may resolve a real one from its own
+ * node_modules, which would report a different (also correct) rejection.
+ */
+function writeUninstallablePnpm(root: string): string {
+  const path = join(root, 'pnpm-uninstallable.mjs')
+  writeFileSync(path, fakePnpmSource(root, { '@deepseek-ai/cordis': '^1.0.0' }, { '@fixture/absent-peer': '^18.2.0' }))
+  return path
+}
+/** The standard fake, reporting failure for each named command after it rewrote the profile. */
+function writeFailingPnpm(root: string, ...commands: readonly string[]): string {
+  const path = join(root, `pnpm-fails-${commands.join('-')}.mjs`)
+  writeFileSync(path, `await import(${JSON.stringify(pathToFileURL(join(root, 'pnpm.mjs')).href)})
+if (${JSON.stringify(commands)}.some(command => process.argv.includes(command))) process.exitCode = 1
+`)
+  return path
+}
+/** The standard fake, additionally leaving a real directory where a runtime package belongs. */
+function writeHostStealingPnpm(root: string): string {
+  const path = join(root, 'pnpm-stealing.mjs')
+  writeFileSync(path, `await import(${JSON.stringify(pathToFileURL(join(root, 'pnpm.mjs')).href)})
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+if (process.argv.includes('add')) {
+  const packageRoot = join(process.cwd(), 'node_modules', '@deepseek-ai', 'cordis')
+  mkdirSync(packageRoot, { recursive: true })
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/cordis', version: '1.0.0' }))
 }
 `)
   return path
@@ -189,22 +227,16 @@ describe('desktop external plugin profile', () => {
     expect(readFileSync(join(manager.paths.profile, 'user-file'), 'utf8')).toBe('retain')
   })
 
-  it.each(['plugin-add', 'runtime-change'] as const)('retries failed rebuild after %s across manager instances', async (operation) => {
+  it('retries a failed runtime rebuild across manager instances', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
-    let dsh = manager.runtime.dsh
-    if (operation === 'runtime-change') {
-      await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
-      dsh = join(root, 'new-node')
-      runtimeFixture(dsh, '1.1.0', '24.18.0')
-    }
+    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    const dsh = join(root, 'new-node')
+    runtimeFixture(dsh, '1.1.0', '24.18.0')
     const failing = join(root, 'fail-rebuild.mjs')
     writeFileSync(failing, `await import(${JSON.stringify(pathToFileURL(manager.runtime.pnpm).href)}); if (process.argv.includes('rebuild')) process.exitCode = 1`)
     const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh, pnpm: failing })
-    if (operation === 'plugin-add') {
-      await worker.applyRelease()
-      await expect(worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).rejects.toThrow('pnpm exited with 1')
-    } else await expect(worker.applyRelease()).rejects.toThrow('pnpm exited with 1')
+    await expect(worker.applyRelease()).rejects.toThrow('pnpm exited with 1')
     expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).toThrow('package preparation is incomplete')
     const count = calls(root).length
     const retry = new DesktopProjectManager(manager.paths, { ...manager.runtime, dsh })
@@ -212,6 +244,23 @@ describe('desktop external plugin profile', () => {
     expect(calls(root).slice(count).map(call => call.args.find(arg => !arg.startsWith('--config.')))).toEqual(['install', 'rebuild'])
     await expect(retry.applyRelease()).resolves.toBe(false)
     expect(calls(root)).toHaveLength(count + 2)
+  })
+
+  it('rolls a failed native rebuild of a new plugin back to the previous profile', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const failing = join(root, 'fail-rebuild.mjs')
+    writeFileSync(failing, `await import(${JSON.stringify(pathToFileURL(manager.runtime.pnpm).href)}); if (process.argv.includes('rebuild')) process.exitCode = 1`)
+    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: failing })
+    await worker.applyRelease()
+    const failure: unknown = await worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks()).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ restored: true })
+    expect((failure as Error).message).toMatch(/pnpm exited with 1/u)
+    // A plugin whose native rebuild never finished is not part of the profile.
+    expect(worker.listPlugins()).toEqual([])
+    expect(existsSync(join(manager.paths.profile, 'desktop-packages-pending'))).toBe(false)
+    expect(() => { worker.assertProfileRuntime(worker.paths.profile) }).not.toThrow()
+    await expect(worker.applyRelease()).resolves.toBe(false)
   })
 
   it('initializes and restarts offline without executing pnpm', async () => {
@@ -346,24 +395,160 @@ describe('desktop external plugin profile', () => {
     expect(existsSync(join(manager.paths.root, 'pending.json'))).toBe(false)
   })
 
-  it('keeps partial package changes and restores host links after pnpm fails', async () => {
+  it('restores the first install on an empty profile when graph validation fails', async () => {
     const { root, manager } = setup()
     await manager.applyRelease()
-    const failingPnpm = join(root, 'failing.mjs')
-    writeFileSync(failingPnpm, `await import(${JSON.stringify(pathToFileURL(manager.runtime.pnpm).href)}); process.exitCode = 1`)
-    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: failingPnpm })
+    const profile = manager.paths.profile
+    const manifest = readFileSync(join(profile, 'package.json'))
+    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: writeUninstallablePnpm(root) })
     await worker.applyRelease()
-    let starts = 0
-    await expect(worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks({
-      afterChange: async () => { starts++ },
-    }))).rejects.toThrow(/pnpm exited with 1/u)
-    expect(worker.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: false }])
-    expect(starts).toBe(0)
-    expect(existsSync(manager.paths.lock)).toBe(false)
-    expect(realpathSync(join(manager.paths.profile, 'node_modules/@deepseek-ai/cordis')))
+    const failure: unknown = await worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks()).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(DesktopProjectMutationError)
+    expect(failure).toMatchObject({ restored: true })
+    // The plugin's own error survives the rollback.
+    expect((failure as Error).message).toMatch(/requires missing @fixture\/absent-peer@\^18\.2\.0/u)
+    expect(readFileSync(join(profile, 'package.json'))).toEqual(manifest)
+    // The profile owned no lockfile before the install, so neither it nor the
+    // package directories were replaced by a manager run.
+    expect(existsSync(join(profile, 'pnpm-lock.yaml'))).toBe(false)
+    expect(existsSync(join(profile, 'desktop-packages-pending'))).toBe(false)
+    expect(existsSync(join(profile, 'node_modules/plugin/package.json'))).toBe(false)
+    expect(worker.listPlugins()).toEqual([])
+    expect(calls(root).map(call => call.args.find(arg => !arg.startsWith('--config.')))).toEqual(['add'])
+    // The restored profile is the one that started: the backend may start again
+    // and the next startup has nothing to reconcile.
+    expect(() => { worker.assertProfileRuntime(profile) }).not.toThrow()
+    await expect(worker.applyRelease()).resolves.toBe(false)
+  })
+
+  it('restores an installed profile when a later install fails graph validation', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    const profile = manager.paths.profile
+    const before = {
+      manifest: readFileSync(join(profile, 'package.json')),
+      lockfile: readFileSync(join(profile, 'pnpm-lock.yaml')),
+      state: readFileSync(join(profile, 'desktop-runtime-state.json'), 'utf8'),
+    }
+    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: writeUninstallablePnpm(root) })
+    await worker.applyRelease()
+    const failure: unknown = await worker.mutate({ type: 'plugin-add', spec: 'other@2.0.0' }, hooks()).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(DesktopProjectMutationError)
+    expect(failure).toMatchObject({ restored: true })
+    expect((failure as Error).message).toMatch(/requires missing @fixture\/absent-peer@\^18\.2\.0/u)
+    // The whole pre-mutation profile is back: the same packages, the same graph.
+    expect(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))).toEqual(JSON.parse(before.manifest.toString('utf8')))
+    expect(readFileSync(join(profile, 'pnpm-lock.yaml'))).toEqual(before.lockfile)
+    expect(readFileSync(join(profile, 'desktop-runtime-state.json'), 'utf8')).toBe(before.state)
+    expect(existsSync(join(profile, 'desktop-packages-pending'))).toBe(false)
+    expect(existsSync(join(profile, 'node_modules/other/package.json'))).toBe(false)
+    expect(worker.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
+    expect(() => { worker.assertProfileRuntime(profile) }).not.toThrow()
+    await expect(worker.applyRelease()).resolves.toBe(false)
+    // Files alone are not enough: the package directories were rebuilt from the
+    // restored lockfile through the same path a runtime change uses.
+    expect(calls(root).slice(-2).map(call => call.args.find(arg => !arg.startsWith('--config.'))))
+      .toEqual(['install', 'rebuild'])
+  })
+
+  it.each([
+    { spec: 'https://example.test/plugin.tgz', message: /unsupported npm package spec/u, label: 'an unsupported source' },
+    { spec: '@deepseek-ai/cordis', message: /host-owned/u, label: 'a runtime-owned package' },
+  ])('leaves the profile untouched when $label is refused before pnpm runs', async ({ spec, message }) => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const before = readFileSync(join(manager.paths.profile, 'package.json'))
+    const failure: unknown = await manager.mutate({ type: 'plugin-add', spec }, hooks()).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(DesktopProjectMutationError)
+    expect(failure).toMatchObject({ restored: true })
+    expect((failure as Error).message).toMatch(message)
+    expect(readFileSync(join(manager.paths.profile, 'package.json'))).toEqual(before)
+    // Nothing drifted, so the rollback did not remove and reinstall node_modules.
+    expect(calls(root)).toEqual([])
+  })
+
+  it('restores the profile when a failed install replaced a runtime-owned link', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const profile = manager.paths.profile
+    const before = readFileSync(join(profile, 'package.json'))
+    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: writeHostStealingPnpm(root) })
+    await worker.applyRelease()
+    const failure: unknown = await worker.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks()).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ restored: true })
+    // Relinking refuses the stolen path before it can create the runtime link.
+    expect((failure as Error).message).toMatch(/refusing to replace unowned package|reserved host package/u)
+    expect(readFileSync(join(profile, 'package.json'))).toEqual(before)
+    expect(existsSync(join(profile, 'desktop-packages-pending'))).toBe(false)
+    expect(realpathSync(join(profile, 'node_modules/@deepseek-ai/cordis')))
       .toBe(realpathSync(join(manager.runtime.dsh, 'node_modules/@deepseek-ai/cordis')))
-    await manager.mutate({ type: 'plugin-remove', name: 'plugin' }, hooks())
-    expect(manager.listPlugins()).toEqual([])
+    expect(() => { worker.assertProfileRuntime(profile) }).not.toThrow()
+    await expect(worker.applyRelease()).resolves.toBe(false)
+  })
+
+  it('keeps the rebuild marker and reports the profile when the rollback cannot run pnpm', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    const profile = manager.paths.profile
+    const before = {
+      manifest: readFileSync(join(profile, 'package.json')),
+      lockfile: readFileSync(join(profile, 'pnpm-lock.yaml')),
+    }
+    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: writeFailingPnpm(root, 'add', 'install') })
+    await worker.applyRelease()
+    const failure: unknown = await worker.mutate({ type: 'plugin-add', spec: 'other@2.0.0' }, hooks()).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ restored: false })
+    expect((failure as Error).message).toMatch(/could not be restored/u)
+    expect((failure as Error).message).toMatch(/pnpm exited with 1/u)
+    // The files are back even though the package directories are not: the marker
+    // hands the rest to the startup rebuild, and the transaction lock is released.
+    expect(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))).toEqual(JSON.parse(before.manifest.toString('utf8')))
+    expect(readFileSync(join(profile, 'pnpm-lock.yaml'))).toEqual(before.lockfile)
+    expect(existsSync(join(profile, 'desktop-packages-pending'))).toBe(true)
+    expect(existsSync(manager.paths.lock)).toBe(false)
+    expect(() => { worker.assertProfileRuntime(profile) }).toThrow(/package preparation is incomplete/u)
+  })
+
+  it('keeps an installed plugin when its removal fails after pnpm rewrote the profile', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    await manager.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())
+    const profile = manager.paths.profile
+    const before = {
+      manifest: readFileSync(join(profile, 'package.json')),
+      lockfile: readFileSync(join(profile, 'pnpm-lock.yaml')),
+    }
+    const worker = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: writeFailingPnpm(root, 'remove') })
+    await worker.applyRelease()
+    const failure: unknown = await worker.mutate({ type: 'plugin-remove', name: 'plugin' }, hooks()).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ restored: true })
+    expect((failure as Error).message).toMatch(/pnpm exited with 1/u)
+    expect(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))).toEqual(JSON.parse(before.manifest.toString('utf8')))
+    expect(readFileSync(join(profile, 'pnpm-lock.yaml'))).toEqual(before.lockfile)
+    expect(existsSync(join(profile, 'node_modules/plugin/package.json'))).toBe(true)
+    expect(existsSync(join(profile, 'desktop-packages-pending'))).toBe(false)
+    expect(worker.listPlugins()).toEqual([{ name: 'plugin', version: '1.0.0', enabled: true }])
+    expect(() => { worker.assertProfileRuntime(profile) }).not.toThrow()
+    await expect(worker.applyRelease()).resolves.toBe(false)
+  })
+
+  it('installs and removes another plugin immediately after a rolled-back failure', async () => {
+    const { root, manager } = setup()
+    await manager.applyRelease()
+    const failing = new DesktopProjectManager(manager.paths, { ...manager.runtime, pnpm: writeUninstallablePnpm(root) })
+    await failing.applyRelease()
+    await expect(failing.mutate({ type: 'plugin-add', spec: 'plugin@1.0.0' }, hooks())).rejects.toThrow(/requires missing @fixture\/absent-peer/u)
+    const worker = new DesktopProjectManager(manager.paths, manager.runtime)
+    await worker.applyRelease()
+    await worker.mutate({ type: 'plugin-add', spec: 'pet-whale@1.1.0' }, hooks())
+    expect(worker.listPlugins()).toEqual([{ name: 'pet-whale', version: '1.1.0', enabled: true }])
+    await expect(worker.applyRelease()).resolves.toBe(false)
+    await worker.mutate({ type: 'plugin-remove', name: 'pet-whale' }, hooks())
+    expect(worker.listPlugins()).toEqual([])
+    expect(existsSync(join(manager.paths.profile, 'desktop-packages-pending'))).toBe(false)
+    await expect(worker.applyRelease()).resolves.toBe(false)
   })
 
   it('holds the transaction lock until the pnpm worker exits', async ({ task, signal }) => {
