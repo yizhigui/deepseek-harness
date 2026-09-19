@@ -2,6 +2,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -11,10 +12,11 @@ import {
   ipcMain,
   Menu,
   protocol,
+  shell,
   type IpcMainInvokeEvent,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
-import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+import { assertPackageName, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from './project-manager.ts'
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
@@ -26,8 +28,17 @@ import { startupFailureDocument } from './startup-document.ts'
 import { initializeShellLog, writeShellLog, defaultShellLogDirectory } from './logger.ts'
 import { desktopConfigDirectory } from './config-directory.ts'
 import { desktopHostEnvironment, resolveDesktopHome } from './desktop-config.ts'
+import { DesktopLifecycle } from './lifecycle.ts'
+import { TaskCompletionWatcher } from './task-signals.ts'
 
 const SCHEME = 'dsh-app'
+/**
+ * Reserved `dsh-app://app` path the Electron shell answers for the Host child
+ * instead of forwarding. It carries the Host's native path operations (reveal in
+ * the file manager, default-application open), which only this process can
+ * perform: it owns the desktop and the Electron `shell` module.
+ */
+const NATIVE_PATH = '/.dsh/native-path'
 let focusPrimaryWindow = (): void => {}
 type RecoveryAction = 'restart' | 'plugins' | 'reset'
 let profileRecoveryAvailable = (): boolean => false
@@ -38,6 +49,9 @@ let recoverApplication = (action: RecoveryAction): Promise<void> => {
   app.quit()
   return Promise.resolve()
 }
+// Assigned once the shell's lifecycle policy exists; window events registered
+// before that point must not observe a half-built policy.
+let desktopLifecycle: DesktopLifecycle | undefined
 
 async function showEmergencyDocument(window: BrowserWindow, message: string): Promise<void> {
   const document = startupFailureDocument(resolveDesktopLocale(app.getLocale()), message, profileRecoveryAvailable())
@@ -144,7 +158,70 @@ function assertDesktopSender(event: IpcMainInvokeEvent, hostnames: readonly stri
   if (senderFrame === null) throw new Error('dsh desktop: rejected IPC without a sender frame')
   const url = new URL(senderFrame.url)
   if (url.protocol !== `${SCHEME}:` || !hostnames.includes(url.hostname)) {
-    throw new Error('dsh desktop: rejected IPC from an unowned renderer')
+    const seen = `${url.protocol}//${url.hostname}`
+    const allowed = hostnames.join(', ')
+    throw new Error(`dsh desktop: rejected IPC from ${seen}; allowed: ${allowed}`)
+  }
+}
+
+/** One native path operation the Host child asked this process to perform. */
+interface DesktopNativePathRequest {
+  readonly operation: 'reveal' | 'open'
+  readonly path: string
+}
+
+/** Parse one native path operation body; null when it is not a valid request. */
+function parseNativePathRequest(value: unknown): DesktopNativePathRequest | null {
+  if (typeof value !== 'object' || value === null) return null
+  const candidate = value as { operation?: unknown; path?: unknown }
+  if (candidate.operation !== 'reveal' && candidate.operation !== 'open') return null
+  if (typeof candidate.path !== 'string' || candidate.path === '') return null
+  return { operation: candidate.operation, path: candidate.path }
+}
+
+/**
+ * Answer one Host-originated native path operation.
+ *
+ * The path is validated before any shell call: it must be absolute and must
+ * exist, so a stale or relative path produces an explicit refusal the caller can
+ * surface instead of a silently ignored reveal. On Windows the file manager is
+ * Electron's `shell.showItemInFolder`, which selects the item natively; a
+ * spawned `explorer.exe /select,` cannot do that reliably for non-ASCII or long
+ * paths, and reports its failure by silently opening the wrong folder.
+ * @param request - the piped request addressed to the reserved path.
+ * @returns a JSON reply describing the outcome.
+ */
+async function serveNativePathRequest(request: Request): Promise<Response> {
+  const reply = (body: { ok: boolean; message?: string }, status = 200): Response => new Response(
+    JSON.stringify(body),
+    { status, headers: { 'content-type': 'application/json; charset=utf-8' } },
+  )
+  if (request.method !== 'POST') return reply({ ok: false, message: 'native path requests must use POST' }, 405)
+  let parsed: DesktopNativePathRequest | null
+  try {
+    parsed = parseNativePathRequest(await request.json())
+  } catch {
+    parsed = null
+  }
+  if (parsed === null) return reply({ ok: false, message: 'native path request is malformed' }, 400)
+  const target = resolve(parsed.path)
+  if (!existsSync(target)) return reply({ ok: false, message: `the path no longer exists: ${target}` }, 404)
+  try {
+    if (parsed.operation === 'reveal') {
+      const info = await stat(target)
+      // `showItemInFolder` selects the item; a directory has nothing to select,
+      // so the folder itself is opened through the default file manager.
+      if (info.isDirectory()) await shell.openPath(target)
+      else shell.showItemInFolder(target)
+    } else {
+      const failure = await shell.openPath(target)
+      if (failure !== '') return reply({ ok: false, message: failure }, 502)
+    }
+    return reply({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    writeShellLog(`native ${parsed.operation} failed for ${target}: ${message}`)
+    return reply({ ok: false, message }, 500)
   }
 }
 
@@ -192,6 +269,23 @@ async function main(): Promise<void> {
   let updateState: DesktopUpdateState = { phase: 'idle' }
   const locale = resolveDesktopLocale(app.getLocale())
   const messages = locale.messages
+  /**
+   * Terminal-task observer. It reads the forwarded-event downlink the shell
+   * already carries, so a notification describes the same running→idle edge the
+   * renderer derives its own completion reminder from — once per run.
+   */
+  const taskWatcher = new TaskCompletionWatcher({
+    onSignal: (signal) => { desktopLifecycle?.notifyTask(signal) },
+  })
+  desktopLifecycle = new DesktopLifecycle({
+    messages,
+    windows: { current: () => mainWindow, activate: () => { focusPrimaryWindow() } },
+    quitting: () => quitting || shellInstallerOwnsQuit,
+    quit: () => {
+      quitting = true
+      app.quit()
+    },
+  })
   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
   const managementPreload = fileURLToPath(new URL('./preload.cjs', import.meta.url))
   const startupUrl = `${SCHEME}://shell/startup.html`
@@ -241,7 +335,7 @@ async function main(): Promise<void> {
     if (development === undefined) manager.assertProfileRuntime(activeProject)
     const hostInspectPort = developmentHostInspectPort(development !== undefined)
     const host = new DesktopHostProcess(resources.node, development ?? resources.dsh, activeProject,
-      hostInspectPort, hostEnvironment, onFailure)
+      hostInspectPort, hostEnvironment, onFailure, (chunk) => { taskWatcher.accept(chunk) })
     return {
       start: () => host.start(),
       stop: () => host.stop(),
@@ -327,13 +421,26 @@ async function main(): Promise<void> {
       return response
     })
     if (url.hostname !== 'app') return Promise.resolve(new Response(null, { status: 404 }))
+    // Reserved path: answered by the shell, never forwarded to the Host.
+    if (url.pathname === NATIVE_PATH) return serveNativePathRequest(request)
     const active = backend.host
     if (active === undefined) return Promise.resolve(new Response('backend unavailable', { status: 503 }))
     return active.fetch(request)
   })
 
-  const mutate = async (event: IpcMainInvokeEvent, mutation: Parameters<DesktopProjectManager['mutate']>[0]): Promise<void> => {
-    assertDesktopSender(event, ['shell'])
+  /**
+   * Apply one plugin-package mutation through the desktop transaction.
+   * @param event - the invoking renderer, checked against `sendableBy`.
+   * @param mutation - the mutation to apply.
+   * @param sendableBy - documents allowed to request it: the shell's own
+   *   plugin-manager window, or the application document carrying the market.
+   */
+  const mutate = async (
+    event: IpcMainInvokeEvent,
+    mutation: Parameters<DesktopProjectManager['mutate']>[0],
+    sendableBy: readonly string[] = ['shell'],
+  ): Promise<void> => {
+    assertDesktopSender(event, sendableBy)
     if (development !== undefined) {
       throw new Error('dsh desktop: plugin package changes require a packaged application')
     }
@@ -376,6 +483,52 @@ async function main(): Promise<void> {
     return mutate(event, { type: 'plugin-toggle', name, enabled })
   })
   ipcMain.handle(DESKTOP_IPC.pluginsDisableAll, event => mutate(event, { type: 'plugins-disable-all' }))
+  // Plugin-market mutations. The market's own `/dsh-market/install` route is an
+  // HTTP mutation behind a same-origin check the application document cannot
+  // satisfy, and it would install with an externally provisioned pnpm. A desktop
+  // install must use this application's own package transaction instead, so the
+  // market UI reaches exactly these four calls.
+  ipcMain.handle(DESKTOP_IPC.marketInstall, async (event, source: unknown) => {
+    if (typeof source !== 'string') return { ok: false, error: 'plugin source must be a string' }
+    try {
+      // The same admission the shell's own add path uses: a registry package
+      // spec, never a command, never a local path, never an http/file spec.
+      packageNameFromSpec(source)
+      await mutate(event, { type: 'plugin-add', spec: source }, ['app'])
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.marketRemove, async (event, name: unknown) => {
+    if (typeof name !== 'string') return { ok: false, error: 'plugin name must be a string' }
+    try {
+      assertPackageName(name)
+      await mutate(event, { type: 'plugin-remove', name }, ['app'])
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.marketUpdate, async (event, name: unknown, version: unknown) => {
+    if (typeof name !== 'string' || typeof version !== 'string') {
+      return { ok: false, error: 'plugin name and version must be strings' }
+    }
+    try {
+      assertPackageName(name)
+      await mutate(event, { type: 'plugin-update', name, version }, ['app'])
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle(DESKTOP_IPC.marketInstalled, (event) => {
+    assertDesktopSender(event, ['app'])
+    if (development !== undefined) return []
+    return manager.listPlugins().map(plugin => ({
+      name: plugin.name, version: plugin.version, enabled: plugin.enabled,
+    }))
+  })
   ipcMain.handle(DESKTOP_IPC.backendStatus, (event) => {
     assertDesktopSender(event, ['shell'])
     return backendState()
@@ -489,6 +642,12 @@ async function main(): Promise<void> {
   const createMainWindow = (): BrowserWindow => {
     const window = createWindow(appPreload, true)
     mainWindow = window
+    // Closing the window is not quitting: hide to the notification area so
+    // background tasks and the Host child keep running. Real quits and OS session
+    // ends set the quit state, which makes this call a no-op.
+    window.on('close', (event: { preventDefault(): void }) => {
+      desktopLifecycle?.handleWindowClose(event)
+    })
     window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
     window.webContents.on('preload-error', (_event, _path, error) => {
       void showEmergencyError(error).catch((failure: unknown) => { console.error(failure) })
@@ -509,6 +668,8 @@ async function main(): Promise<void> {
         .catch((error: unknown) => { console.error(error) })
       return
     }
+    // Restoring before showing covers the minimized case; showing before focusing
+    // covers the hidden-to-tray case the window `close` policy creates.
     if (window.isMinimized()) window.restore()
     window.show()
     window.focus()
@@ -517,9 +678,9 @@ async function main(): Promise<void> {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) focusPrimaryWindow()
   })
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit()
-  })
+  // No `window-all-closed` quit: closing the window hides it to the notification
+  // area, and the application ends only through the tray's Quit item, the
+  // application menu, an update install, or an OS session end.
   app.on('before-quit', (event) => {
     if (shellInstallerOwnsQuit || quitting) return
     event.preventDefault()
@@ -528,6 +689,10 @@ async function main(): Promise<void> {
     void backend.close().catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
   })
 
+  // The lifecycle object is built above, so this is never optional in production;
+  // the guard keeps a fatal-bootstrap window that never reached that point safe.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  desktopLifecycle?.setup()
   mainWindow = createMainWindow()
   await reconcileBackend().catch(() => undefined)
   // Window lifecycle callbacks run while backend startup is pending.

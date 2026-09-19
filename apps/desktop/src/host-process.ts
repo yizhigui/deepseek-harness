@@ -27,7 +27,15 @@ interface PendingResponse {
   controller?: ReadableStreamDefaultController<Uint8Array>
   requestReader?: ReadableStreamDefaultReader<Uint8Array>
   removeAbort?: () => void
+  /** Path the request addressed, used to recognize the forwarded-event downlink. */
+  pathname?: string
 }
+
+/**
+ * Path of the Host's forwarded-event downlink. Mirrors `DESKTOP_STREAM_PATH` in
+ * the Host child; the shell only needs the pathname, never the wire format.
+ */
+const DESKTOP_EVENT_STREAM_PATH = '/.dsh/remote-stream'
 
 function isDesktopHostEvent(message: unknown): message is DesktopHostEvent {
   if (typeof message !== 'object' || message === null || !('type' in message)) return false
@@ -92,6 +100,8 @@ export class DesktopHostProcess {
    * @param inspectPort - optional loopback inspector port for workspace development.
    * @param environment - Child environment; runtime and package-manager overrides are removed.
    * @param onFailure - Receives the first fatal child or transport failure, including after readiness.
+   * @param observeEvents - Optional observer for the forwarded-event downlink bytes. The
+   * carrier stays byte-transparent: observation can neither delay nor alter a response.
    */
   constructor(
     private readonly node: string,
@@ -100,6 +110,7 @@ export class DesktopHostProcess {
     private readonly inspectPort?: number,
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly onFailure?: (error: Error) => void,
+    private readonly observeEvents?: (chunk: Uint8Array) => void,
   ) {}
 
   /** Start the child once and resolve only after its complete composition is active. */
@@ -173,12 +184,14 @@ export class DesktopHostProcess {
     const streamId = this.nextStreamId++
     const method = request.method.toUpperCase()
     const hasBody = method !== 'GET' && method !== 'HEAD' && request.body !== null
+    const pathname = new URL(request.url).pathname
     return new Promise<Response>((resolve, reject) => {
       const pending: PendingResponse = {
         resolve,
         reject,
         responseStarted: false,
         uploadOpen: hasBody,
+        pathname,
       }
       const abort = (): void => {
         if (!this.pending.has(streamId)) return
@@ -328,6 +341,15 @@ export class DesktopHostProcess {
           throw new Error(`dsh desktop host sent body data before a body start for stream ${String(frame.streamId)}`)
         }
         controller.enqueue(frame.data)
+        // Observation happens after the bytes are handed to the caller, so a
+        // failing or slow observer cannot delay or truncate the response.
+        if (pending.pathname === DESKTOP_EVENT_STREAM_PATH) {
+          try {
+            this.observeEvents?.(frame.data)
+          } catch (error) {
+            console.error('[desktop] forwarded-event observation failed', error)
+          }
+        }
         if ((controller.desiredSize ?? 0) <= 0) {
           this.blockedResponses.add(frame.streamId)
           this.responsePipe?.pause()

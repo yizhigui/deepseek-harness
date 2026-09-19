@@ -1290,7 +1290,13 @@ describe('ChatView', () => {
   })
 
   it('renders terminal turn failures inline with their durable message and optional code', () => {
-    const h = makeHarness({ nodes: [user(1, 'try'), turnError(2, 'AUTH'), turnError(3)] })
+    // A terminal failure closes its turn. Leaving the turn unclosed would keep the
+    // turn-level activity status visible beside the failure notice, which is what
+    // the status means: the run has not ended yet.
+    const h = makeHarness({
+      nodes: [user(1, 'try'), turnError(2, 'AUTH'), turnError(3)],
+      turnEnds: new Map([[1, 3]]),
+    })
     const view = render(<h.ChatView {...h.props} />)
     const statuses = view.getAllByRole('status')
     expect(statuses.map(status => status.textContent)).toEqual([
@@ -1300,7 +1306,10 @@ describe('ChatView', () => {
   })
 
   it('renders the max-tokens notice with localized guidance, distinct from turn errors', () => {
-    const h = makeHarness({ nodes: [user(1, 'try'), assistant(2, 'truncated'), turnMaxTokens(3)] })
+    const h = makeHarness({
+      nodes: [user(1, 'try'), assistant(2, 'truncated'), turnMaxTokens(3)],
+      turnEnds: new Map([[1, 3]]),
+    })
     const view = render(<h.ChatView {...h.props} />)
     const statuses = view.getAllByRole('status')
     expect(statuses.map(status => status.textContent)).toEqual([

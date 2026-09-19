@@ -17,9 +17,55 @@ vi.mock('node:child_process', () => ({ execFile: execFileMock }))
 
 import { release as osRelease } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
-import { canOpenNativePath, nativeFileManager, revealNativePath, openNativePath, openNativeTextFile, type PathOpenerRunner } from '../src/index.ts'
+import {
+  canOpenNativePath, nativeFileManager, revealNativePath, openNativePath, openNativeTextFile,
+  registerNativeDesktopBridge, type PathOpenerRunner,
+} from '../src/index.ts'
 
 const signal = () => new AbortController().signal
+
+describe('shell-owned native opener', () => {
+  it('prefers the registered shell bridge over any spawned command for reveal and open', async () => {
+    const bridge = { reveal: vi.fn(async () => {}), open: vi.fn(async () => {}) }
+    const release = registerNativeDesktopBridge(bridge)
+    try {
+      execFileMock.mockClear()
+      await revealNativePath('C:\\work\\报告.txt', signal())
+      await openNativePath('C:\\work\\报告.txt', signal())
+      expect(bridge.reveal).toHaveBeenCalledExactlyOnceWith('C:\\work\\报告.txt', expect.any(AbortSignal))
+      expect(bridge.open).toHaveBeenCalledExactlyOnceWith('C:\\work\\报告.txt', expect.any(AbortSignal))
+      // The shell can select the item; no process may be spawned at all.
+      expect(execFileMock).not.toHaveBeenCalled()
+    } finally {
+      release()
+    }
+  })
+
+  it('keeps the spawned command when a test injects its own runner', async () => {
+    const bridge = { reveal: vi.fn(async () => {}), open: vi.fn(async () => {}) }
+    const release = registerNativeDesktopBridge(bridge)
+    try {
+      const run = vi.fn<PathOpenerRunner>().mockResolvedValue({ stdout: '', stderr: '' })
+      await revealNativePath('C:\\work\\report.txt', signal(), { platform: 'win32', run })
+      expect(run).toHaveBeenCalledOnce()
+      expect(bridge.reveal).not.toHaveBeenCalled()
+    } finally {
+      release()
+    }
+  })
+
+  it('surfaces a bridge failure instead of acknowledging the reveal', async () => {
+    const release = registerNativeDesktopBridge({
+      reveal: async () => { throw new Error('the path no longer exists') },
+      open: async () => {},
+    })
+    try {
+      await expect(revealNativePath('C:\\gone.txt', signal())).rejects.toThrow('the path no longer exists')
+    } finally {
+      release()
+    }
+  })
+})
 
 describe('native path opener', () => {
   it('opens with macOS open(1)', async () => {
@@ -331,7 +377,7 @@ describe('canOpenNativePath', () => {
 describe('native file manager', () => {
   it.each([
     ['darwin', 'finder', '/tmp/my report.txt', 'open', ['-R', '/tmp/my report.txt']],
-    ['win32', 'explorer', 'C:\\work\\my report.txt', 'explorer.exe', ['/select,', 'file:///C:/work/my%20report.txt']],
+    ['win32', 'explorer', 'C:\\work\\my report.txt', 'explorer.exe', ['/select,', 'C:\\work\\my report.txt']],
     ['linux', 'directory', '/tmp/a $b; report.txt', 'xdg-open', ['/tmp']],
   ] as const)('reveals through %s without opening the file association', async (platform, manager, path, command, args) => {
     const run = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
@@ -347,7 +393,7 @@ describe('native file manager', () => {
     expect(nativeFileManager(internals)).toBe('explorer')
     await revealNativePath('/mnt/c/work/报告.txt', signal(), internals)
     expect(run.mock.calls.map(([cmd, args]) => [cmd, args])).toEqual([
-      ['wslpath', ['-w', '/mnt/c/work/报告.txt']], ['explorer.exe', ['/select,', 'file:///C:/work/%E6%8A%A5%E5%91%8A.txt']],
+      ['wslpath', ['-w', '/mnt/c/work/报告.txt']], ['explorer.exe', ['/select,', 'C:\\work\\报告.txt']],
     ])
   })
 
@@ -406,10 +452,13 @@ it('preserves cancellation even when Explorer returns delegate exit 1', async ()
 })
 
 it.each([
-  ['C:\\my files\\报告,#%.txt', 'file:///C:/my%20files/%E6%8A%A5%E5%91%8A%2C%23%25.txt'],
-  ['\\\\server\\share\\a,b.txt', 'file://server/share/a%2Cb.txt'],
-])('preserves special characters in the Explorer target %s', async (path, target) => {
+  'C:\\my files\\报告,#%.txt',
+  '\\\\server\\share\\a,b.txt',
+])('hands Explorer the plain path so non-ASCII and special characters resolve %s', async (path) => {
   const run = vi.fn<PathOpenerRunner>().mockResolvedValue({ stdout: '', stderr: '' })
   await revealNativePath(path, signal(), { platform: 'win32', run })
-  expect(run).toHaveBeenCalledWith('explorer.exe', ['/select,', target], expect.any(AbortSignal))
+  // A `file:///` URL would percent-encode this path, and Explorer's `/select,`
+  // item lookup cannot resolve those escapes: it silently opens the default shell
+  // folder and still exits 1, which the delegate tolerance below reads as success.
+  expect(run).toHaveBeenCalledWith('explorer.exe', ['/select,', path], expect.any(AbortSignal))
 })

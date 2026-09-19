@@ -4,6 +4,10 @@
 
 export { StateDot } from './StateDot.tsx'
 export type { StateDotState } from './StateDot.tsx'
+export { turnActivity } from './turn-activity.ts'
+export type { TurnActivityRead, TurnTimelineRead } from './turn-activity.ts'
+export { todoCounts } from './todo-counts.ts'
+export type { TodoCountItem, TodoCounts } from './todo-counts.ts'
 export { DisclosureRow } from './DisclosureRow.tsx'
 export type { DisclosureRowProps } from './DisclosureRow.tsx'
 export { Button } from './Button.tsx'

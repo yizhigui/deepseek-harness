@@ -11,8 +11,8 @@
 
 import { release as osRelease } from 'node:os'
 import { dirname, extname } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { runNativeCommand, type NativeCommandRunner } from './runner.ts'
+import { nativeDesktopBridge } from './desktop-bridge.ts'
 
 /** Testable command boundary; native implementations never invoke a shell. */
 export type PathOpenerRunner = NativeCommandRunner
@@ -128,6 +128,14 @@ async function openNativePathWithIntent(
   const run = internals.run ?? runNativeCommand
   const env = internals.env ?? process.env
   const wsl = platform === 'linux' && isWsl(internals)
+  const bridged = internals.run === undefined ? nativeDesktopBridge() : undefined
+  // A shell-owned opener owns the desktop's own handoff, so it replaces every
+  // spawned command for the intent it supports: the browser preference applies to
+  // a browser carrier, and a text-editor intent has no shell equivalent.
+  if (bridged !== undefined && intent === 'default') {
+    await bridged.open(path, signal)
+    return
+  }
 
   if (!wsl && intent === 'default' && BROWSER_DOCUMENTS.has(extname(path).toLowerCase())
     && await openInBrowser(path, signal, platform, run, env)) return
@@ -220,6 +228,18 @@ export function nativeFileManager(internals: PathOpenerInternals = {}): NativeFi
 
 /**
  * Reveal a file in Finder or Explorer, or open its parent in the Linux default file manager.
+ *
+ * Windows selection is the delicate case. `explorer.exe /select,<path>` must
+ * receive the **plain** path: a `file:///` URL is percent-encoded, and Explorer's
+ * item lookup cannot resolve those escapes, so it silently falls back to the
+ * default shell folder and still exits 1 — an outcome the delegated-handoff
+ * tolerance below cannot distinguish from success. A plain path is safe because
+ * Node quotes an argument containing spaces for us, as long as the path stays a
+ * separate argv element.
+ *
+ * When the process runs under a GUI shell that registered a native opener
+ * ({@link registerNativeDesktopBridge}), that opener takes precedence: it can
+ * select the item through the desktop's own API rather than a spawned command.
  * @param path - absolute file path already authorized by the caller.
  * @param signal - caller lifetime; abort terminates the native command.
  * @param internals - platform, environment, and command runner for adapter tests.
@@ -229,6 +249,11 @@ export async function revealNativePath(
   path: string, signal: AbortSignal, internals: PathOpenerInternals = {},
 ): Promise<void> {
   signal.throwIfAborted()
+  const bridged = internals.run === undefined ? nativeDesktopBridge() : undefined
+  if (bridged !== undefined) {
+    await bridged.reveal(path, signal)
+    return
+  }
   const platform = internals.platform ?? process.platform
   const run = internals.run ?? runNativeCommand
   const manager = nativeFileManager({ ...internals, platform })
@@ -244,10 +269,8 @@ export async function revealNativePath(
       windowsPath = translated.stdout.replace(/[\r\n]+$/, '')
       if (windowsPath === '') throw new Error('wslpath returned no Windows path')
     }
-    // Explorer parses commas itself; a file URI preserves commas and whitespace in the path.
-    const target = pathToFileURL(windowsPath, { windows: true }).href.replaceAll(',', '%2C')
     try {
-      await run('explorer.exe', ['/select,', target], signal)
+      await run('explorer.exe', ['/select,', windowsPath], signal)
     } catch (error) {
       signal.throwIfAborted()
       // Explorer can exit 1 after delegating to the existing desktop process.

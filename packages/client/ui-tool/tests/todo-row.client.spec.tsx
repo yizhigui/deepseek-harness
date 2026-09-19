@@ -32,17 +32,17 @@ const PARALLEL: TodoItem[] = [
 ]
 
 describe('planSummary', () => {
-  it('counts done/total and names the single active item with no extra count', () => {
-    expect(planSummary(LIST)).toEqual({ done: 1, total: 3, activeContent: '写组件', activeExtra: 0 })
+  it('counts done/pending/total and names the single active item with no extra count', () => {
+    expect(planSummary(LIST)).toEqual({ done: 1, pending: 1, total: 3, activeContent: '写组件', activeExtra: 0 })
   })
 
   it('reports the extra active count separately when several items are in progress', () => {
-    expect(planSummary(PARALLEL)).toEqual({ done: 1, total: 5, activeContent: '写组件', activeExtra: 2 })
+    expect(planSummary(PARALLEL)).toEqual({ done: 1, pending: 1, total: 5, activeContent: '写组件', activeExtra: 2 })
   })
 
   it('has no hint when nothing is in progress', () => {
     expect(planSummary([{ content: '都完了', status: 'completed' }]))
-      .toEqual({ done: 1, total: 1, activeContent: null, activeExtra: 0 })
+      .toEqual({ done: 1, pending: 0, total: 1, activeContent: null, activeExtra: 0 })
   })
 
   it('has no hint when the first active item carries no usable content', () => {
@@ -55,7 +55,7 @@ describe('planSummary', () => {
   })
 
   it('is empty-safe', () => {
-    expect(planSummary([])).toEqual({ done: 0, total: 0, activeContent: null, activeExtra: 0 })
+    expect(planSummary([])).toEqual({ done: 0, pending: 0, total: 0, activeContent: null, activeExtra: 0 })
   })
 })
 

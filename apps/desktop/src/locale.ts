@@ -49,6 +49,11 @@ export const en = {
   refreshing: 'Refreshing…',
   refreshed: 'Plugin list refreshed.',
   loadingPlugins: 'Reading Desktop plugins…',
+  trayOpen: 'Open DeepSeek Harness',
+  trayQuit: 'Quit DeepSeek Harness',
+  closeToTrayHint: 'DeepSeek Harness keeps running in the notification area.',
+  notificationTaskCompleted: 'Task completed',
+  notificationTaskFailed: 'The task failed. Open DeepSeek Harness for details.',
 } as const
 
 /** Every Desktop locale supplies the complete English key set. */
@@ -103,6 +108,11 @@ export const zh = {
   refreshing: '正在刷新…',
   refreshed: '插件列表已刷新。',
   loadingPlugins: '正在读取桌面插件…',
+  trayOpen: '打开 DeepSeek Harness',
+  trayQuit: '退出 DeepSeek Harness',
+  closeToTrayHint: 'DeepSeek Harness 会继续在通知区域运行。',
+  notificationTaskCompleted: '任务已完成',
+  notificationTaskFailed: '任务执行失败，请打开 DeepSeek Harness 查看详情。',
 } as const satisfies DesktopMessages
 
 /** Locale payload exposed to the Desktop-owned renderer. */

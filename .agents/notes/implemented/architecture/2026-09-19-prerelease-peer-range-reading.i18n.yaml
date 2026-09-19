@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-19-prerelease-peer-range-reading.md
+2026-09-19-prerelease-peer-range-reading.md: cc9b9cf5e3b05190082f5b2247e59c3880728c4f
+2026-09-19-prerelease-peer-range-reading.zh.md: 90d253c9cc77f595a3985aff361c20fc19fc8645

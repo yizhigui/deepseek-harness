@@ -495,21 +495,20 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByText('Selected Folder')).toBeTruthy()
   })
 
-  it('keeps a rejected first prompt engaging instead of returning to the Hero', () => {
-    const failed = sessionSnapshotOf({
-      blank: true,
-      promptAttempted: true,
-      awaitingFirstTurn: true,
-      promptError: {
-        op: 'send',
-        error: new RemoteError('session/agent-busy', 'busy', { reason: 'busy' }),
-      },
-    })
+  it('keeps a rejected first prompt engaging instead of returning to the Hero', () => {    const failed = sessionSnapshotOf({
+    blank: true,
+    promptAttempted: true,
+    awaitingFirstTurn: true,
+    promptError: {
+      op: 'send',
+      error: new RemoteError('session/agent-busy', 'busy', { reason: 'busy' }),
+    },
+  })
 
-    expect(conversationPhase(failed, EMPTY_CONVERSATION_SNAPSHOT)).toBe('engaging')
-    const b = mount(failed, undefined, undefined, { summaryBlank: true })
-    expect(b.view.container.querySelector('[data-phase]')?.getAttribute('data-phase')).toBe('active')
-    expect(b.view.queryByText('探索未至之境')).toBeNull()
+  expect(conversationPhase(failed, EMPTY_CONVERSATION_SNAPSHOT)).toBe('engaging')
+  const b = mount(failed, undefined, undefined, { summaryBlank: true })
+  expect(b.view.container.querySelector('[data-phase]')?.getAttribute('data-phase')).toBe('active')
+  expect(b.view.queryByText('探索未至之境')).toBeNull()
   })
 
   it('settling phase: a summary that does not prove the session blank hides the composer while it opens', () => {

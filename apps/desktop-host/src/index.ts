@@ -37,6 +37,8 @@ import {
   encodeDesktopResponseStart,
   type DesktopHostRequestFrame,
 } from './wire.ts'
+import { DesktopWebServer } from './desktop-web-server.ts'
+import { installNativeDesktopBridge } from './native-bridge.ts'
 
 export { DESKTOP_HOST_PROTOCOL_VERSION } from './wire.ts'
 
@@ -287,6 +289,16 @@ export async function runDesktopHost(
   const rootConfig = join(absoluteProject, ROOT_CONFIG_FILENAME)
   writeFileSync(rootConfig, ROOT_CONFIG)
   const environment = loadLayeredEnv('dsh desktop')
+  // Route native path operations (reveal in the file manager, default-app open)
+  // to the Electron shell, which owns the desktop and its `shell` module. The
+  // Host child has neither, and a spawned `explorer.exe` cannot select an item
+  // reliably. Installed before boot so every plugin sees the same opener.
+  const releaseNativeBridge = installNativeDesktopBridge()
+  // Claim the `webServer` service seat before the plugin tree mounts. A plugin
+  // host half that declares `inject: ['webServer']` (the market among them)
+  // would otherwise stay pending forever and never mount its routes; this seat
+  // matches the same registration contract without opening a listening socket.
+  let pluginWebServer: DesktopWebServer | undefined
   let current: Context | undefined
   const ctx = await boot('dsh desktop', rootConfig, structuredClone(desktopPatches(
     resolve(runtimeDir),
@@ -294,6 +306,7 @@ export async function runDesktopHost(
     options.allowLinkedPackages === true,
   )), (hostCtx) => {
     current = hostCtx
+    pluginWebServer = new DesktopWebServer(hostCtx)
     hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
     provideCmdline(hostCtx, { args: [], exit: () => {} })
   })
@@ -315,6 +328,7 @@ export async function runDesktopHost(
     disposing ??= (async () => {
       for (const controller of requests.values()) controller.abort()
       requests.clear()
+      releaseNativeBridge()
       await current?.fiber.dispose()
       current = undefined
     })()
@@ -339,11 +353,14 @@ export async function runDesktopHost(
           signal: controller.signal,
         }
         const request = new Request(url, init)
+        // Plugin routes own their paths before the static/SPA fallback: without
+        // that order an unmounted `/dsh-market/*` request answers the SPA
+        // document where its caller expects JSON.
         const response = url.pathname === DESKTOP_STREAM_PATH
           ? await streams.fetch(request)
           : url.pathname.startsWith('/api/')
             ? await api.fetch(request)
-            : await assets.fetch(request)
+            : (await pluginWebServer?.fetch(request)) ?? await assets.fetch(request)
         await writeResponse(encodeDesktopResponseStart(command.streamId, {
           status: response.status,
           headers: [...response.headers.entries()],

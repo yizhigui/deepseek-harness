@@ -17,3 +17,5 @@ export type {
   PathOpenerInternals,
   PathOpenerRunner,
 } from './path-opener.ts'
+export { nativeDesktopBridge, registerNativeDesktopBridge } from './desktop-bridge.ts'
+export type { NativeDesktopBridge } from './desktop-bridge.ts'
