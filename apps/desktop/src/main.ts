@@ -16,7 +16,7 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
-import { assertPackageName, DesktopProjectManager, packageNameFromSpec, type DesktopProjectHooks } from './project-manager.ts'
+import { assertPackageName, DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
@@ -30,6 +30,7 @@ import { desktopConfigDirectory } from './config-directory.ts'
 import { desktopHostEnvironment, resolveDesktopHome } from './desktop-config.ts'
 import { DesktopLifecycle } from './lifecycle.ts'
 import { TaskCompletionWatcher } from './task-signals.ts'
+import { createMarketInstallResolver, loadMarketRegistry } from './market-source.ts'
 
 const SCHEME = 'dsh-app'
 /**
@@ -490,13 +491,21 @@ async function main(): Promise<void> {
   // satisfy, and it would install with an externally provisioned pnpm. A desktop
   // install must use this application's own package transaction instead, so the
   // market UI reaches exactly these four calls.
+  //
+  // An install request carries the plugin's registry URL, which is a repository
+  // address rather than an install target. It is resolved against the registry the
+  // shell fetches itself, and only an entry's own npm package may be installed; see
+  // `market-source.ts` for why the name cannot be derived from the URL. A request
+  // that matches no entry never reaches the package manager.
+  const resolveMarketInstall = createMarketInstallResolver(() => loadMarketRegistry())
   ipcMain.handle(DESKTOP_IPC.marketInstall, async (event, source: unknown) => {
     if (typeof source !== 'string') return { ok: false, error: 'plugin source must be a string' }
     try {
-      // The same admission the shell's own add path uses: a registry package
-      // spec, never a command, never a local path, never an http/file spec.
-      packageNameFromSpec(source)
-      await mutate(event, { type: 'plugin-add', spec: source }, ['app'])
+      const resolved = await resolveMarketInstall(source)
+      if (!resolved.ok) return { ok: false, error: resolved.message }
+      // The resolver already admitted this spec; the mutation admits it again as the
+      // last boundary before pnpm runs.
+      await mutate(event, { type: 'plugin-add', spec: resolved.spec }, ['app'])
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
