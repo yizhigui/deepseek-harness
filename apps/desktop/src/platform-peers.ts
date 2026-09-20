@@ -3,7 +3,8 @@
  *
  * The shell owns a frozen module table: `packages/client/web/src/seed.ts`
  * statically imports the instances the shell bundle inlines, and
- * `packages/client/web/src/platform.ts` (`PLATFORM_MODULES`) is the single
+ * `packages/client/web/src/platform.ts` (`PLATFORM_MODULES`, published as
+ * `@deepseek-ai/dsh-client-web/platform`) is the single
  * source of truth for the specifiers that table answers — the same list the
  * tsdown client externals build plugin bundles against. A plugin's browser half
  * therefore never ships React or the shell's UI packages: `require` for one of
@@ -53,7 +54,7 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { PLATFORM_MODULES, type PlatformModule } from '@deepseek-ai/dsh-client-web/src/platform.ts'
+import { PLATFORM_MODULES, type PlatformModule } from '@deepseek-ai/dsh-client-web/platform'
 
 /** How one platform specifier reaches the Desktop runtime. */
 export type PlatformPeerProvisioning =

@@ -162,6 +162,9 @@
     { "path": "./packages/attachment/attachment" },
     { "path": "./packages/attachment/attachment-local" },
     { "path": "./packages/client/file-upload/tsconfig.host.json" },
+    // The renderer shell's platform module contract, consumed by the Desktop
+    // packaging scripts. Only its pure-data Host face belongs to this program.
+    { "path": "./packages/client/web/tsconfig.host.json" },
     { "path": "./packages/llm/llm" },
     { "path": "./packages/llm/deepseek-llm-api-extensions" },
     { "path": "./packages/llm/token-meter" },

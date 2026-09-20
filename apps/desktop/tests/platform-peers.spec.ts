@@ -7,6 +7,13 @@
  * @deepseek-ai/dsh-client-ui-primitives@^0.1.5-rc.1`) and proves that the
  * platform provisioning admits those graphs without introducing a second React
  * instance into the page.
+ *
+ * The contract is named through its published subpath
+ * (`@deepseek-ai/dsh-client-web/platform`), which is pure data. Assertions that
+ * must evaluate the shell's seed table live in
+ * `packages/client/web/tests/platform-contract.client.spec.ts`: that table
+ * statically imports React and the UI packages, and that graph belongs to the
+ * Client compiler face.
  */
 
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
@@ -15,8 +22,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { satisfies } from 'semver'
-import { PLATFORM_MODULES } from '@deepseek-ai/dsh-client-web/src/platform.ts'
-import { getStaticModules } from '@deepseek-ai/dsh-client-web/src/seed.ts'
+import { PLATFORM_MODULES } from '@deepseek-ai/dsh-client-web/platform'
 import {
   platformClosureRoots, platformPeerRecords, platformRegistryPeers,
 } from '../src/platform-peers.ts'
@@ -82,12 +88,6 @@ it('derives every platform peer from PLATFORM_MODULES and classifies each one', 
   const records = platformPeerRecords()
   expect(records.map(record => record.specifier)).toEqual([...PLATFORM_MODULES])
   for (const record of records) expect(record.packageName).not.toBe('')
-})
-
-it('seeds exactly the classified specifiers into the shell module table', () => {
-  // The seed table is what a plugin's `require` actually hits; a specifier the
-  // table does not answer would fail at runtime even with a runtime package.
-  expect(Object.keys(getStaticModules()).sort()).toEqual([...PLATFORM_MODULES].sort())
 })
 
 it('classifies only real packages as provisionable and collapses subpaths', () => {
@@ -238,16 +238,6 @@ it('provisions no package that could become a second client bundle', () => {
     const manifest = JSON.parse(readFileSync(require.resolve(`${record.packageName}/package.json`), 'utf8')) as { dsh?: { client?: unknown } }
     expect(manifest.dsh?.client).toBeUndefined()
   }
-})
-
-it('keeps the seeded React instance the one the renderer resolves', () => {
-  // The seed holds the shell's own static import; identity therefore follows
-  // from module resolution, and the runtime copy can only ever be a second
-  // on-disk artifact for Node, never a second instance for the page.
-  const require = createRequire(join(RENDERER_ROOT, 'package.json'))
-  const seeded = getStaticModules().react as { version?: string }
-  const resolved = JSON.parse(readFileSync(require.resolve('react/package.json'), 'utf8')) as { version: string }
-  expect(seeded.version).toBe(resolved.version)
 })
 
 it('writes a manifest the profile can link without a duplicate name', () => {
