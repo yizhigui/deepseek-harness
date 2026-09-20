@@ -1,0 +1,114 @@
+# TEMPORARY measurement workflow.
+#
+# It exists solely on the throwaway branch `ci/baseline-consumer-flake` and is
+# never merged. Its question is narrow: are the five `test:expected` failures
+# seen on the mirrored consumer lane a flake, or a stable property of a standard
+# GitHub-hosted runner?
+#
+# The official `node-24-consumers` job runs on a 16 vCPU enterprise runner while
+# this study runs alone on `ubuntu-latest`, with no sibling heavy job competing
+# for the same host, so a round that passes here is evidence of contention-driven
+# flakiness rather than of a code regression. Nothing is skipped, no timeout is
+# changed, and every round's exit status is recorded and uploaded.
+name: Baseline Consumer Flake Study
+
+on:
+  push:
+    branches:
+      - ci/baseline-consumer-flake
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  TESTED_SHA: f8707e1f057d7591d8fe923899847bce81a60ce7
+
+jobs:
+  consumer-flake:
+    name: test:expected five specs, three rounds, alone on the host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Use runner-owned temporary storage
+        run: |
+          echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TEMP%/*}/ms-playwright" >> "$GITHUB_ENV"
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+      - name: Install web frontend browsers
+        run: |
+          pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
+          pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install chromium
+      - name: Build the assembled tree the expected lane runs against
+        env:
+          DSH_BUILD_CLIENT_PROFILE: official
+        run: pnpm run build
+      - name: Record the host the rounds run on
+        run: |
+          {
+            echo "nproc=$(nproc)"
+            echo "memory_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+            echo "loadavg=$(cat /proc/loadavg)"
+            echo "node=$(node --version)"
+            echo "pnpm=$(pnpm --version)"
+          } | tee runner.txt
+      - name: Run the five expected specs three times
+        run: |
+          set -uo pipefail
+          specs=(
+            apps/cli/tests/web-browser-open.expected.e2e.ts
+            apps/cli/tests/profiles/acp/tests/image-offload.expected.e2e.ts
+            apps/cli/tests/profiles/headless/tests/headless.expected.e2e.ts
+            apps/cli/tests/profiles/headless/tests/session-format-guard.expected.e2e.ts
+            apps/cli/tests/profiles/headless/tests/workspace-context-resume.expected.e2e.ts
+          )
+          : > rounds.txt
+          for round in 1 2 3; do
+            echo "=== round ${round} ==="
+            echo "round=${round} loadavg_before=$(cat /proc/loadavg)" >> rounds.txt
+            start=${SECONDS}
+            set +e
+            pnpm run test:expected -- "${specs[@]}" > "round-${round}.log" 2>&1
+            status=$?
+            set -e
+            duration=$((SECONDS - start))
+            echo "round=${round} exit=${status} duration=${duration}s loadavg_after=$(cat /proc/loadavg)" >> rounds.txt
+            echo "round=${round} exit=${status} duration=${duration}s"
+            awk '/^ *(FAIL|Test Files|Tests |Duration|✓|×)/ {print}' "round-${round}.log" | tail -24
+          done
+          echo 'rounds recorded'
+      - name: Summarize the rounds
+        run: |
+          set -euo pipefail
+          cat rounds.txt
+          passed=$(awk '/exit=0/ {n++} END {print n+0}' rounds.txt)
+          echo "passed rounds: ${passed} / 3"
+          echo "A round that passes here is a flake on the mirrored lane; zero passing rounds is a stable failure."
+          test "${passed}" -ge 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: consumer-flake-evidence
+          path: |
+            rounds.txt
+            runner.txt
+            round-*.log
