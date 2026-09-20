@@ -1,0 +1,99 @@
+# TEMPORARY repeatability-only workflow.
+#
+# Exists solely on the throwaway branches matching `ci/coverage-repeat-*` and is
+# never merged. The code under test is NOT these branches: the job pins the
+# tested commit explicitly and proves the resulting SHA and a clean tree.
+#
+# Purpose: decide whether the two `check:ci:coverage` failures observed on the
+# previous 4-vCPU hosted run are a deterministic defect or a capacity/timing
+# flake. Nothing is tuned: gate command, gate env, Node version, pnpm version
+# (from the repository's `packageManager` field) and the bubblewrap preparation
+# are copied verbatim from `.github/workflows/ci.yml`'s `node-24-coverage` job.
+# No timeout, concurrency, threshold or retry is changed, and no test is edited.
+#
+# Three independent runs are produced by pushing the SAME commit to three branch
+# names matching this pattern; each push is a separate run on a fresh runner.
+name: Coverage Repeatability Confirmation
+
+on:
+  push:
+    branches:
+      - 'ci/coverage-repeat-*'
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  TESTED_SHA: d27b0ebb1601dc860289e1cc28e20d8bc15493e8
+  # `github.event.pull_request.base.sha` for this commit: the merge base of the
+  # tested commit and the fork's default branch.
+  ARCHIVE_BASE_REF: c291e7961a515f6d7af9304e7fd1d257929aef26
+
+jobs:
+  linux-coverage:
+    name: "node 24 / coverage (official: check:ci:coverage)"
+    runs-on: ubuntu-latest
+    env:
+      DSH_COVERAGE_MAX_WORKERS: '6'
+      DSH_COVERAGE_PARTITIONS: '4'
+      DSH_GATE_CONCURRENCY: '3'
+      DSH_COVERAGE_TEST_TIMEOUT_MS: '90000'
+      DSH_GATE_FAIL_FAST: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+      - name: Use runner-owned temporary storage
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+      - name: Redirect Node compile cache to runner temp
+        run: echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Record the host the run executes on
+        run: |
+          echo "runner OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
+          echo "cpu count: $(nproc)"
+          echo "model: $(grep -m1 'model name' /proc/cpuinfo || true)"
+          echo "mem: $(free -h | awk '/Mem:/{print $2}')"
+          echo "ref: ${GITHUB_REF}"
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install dependencies and prepare bubblewrap
+        run: |
+          pnpm install --frozen-lockfile &
+          install_pid=$!
+          (
+            if ! bash scripts/prepare-ci-bubblewrap.sh; then
+              echo "::warning::the pinned bubblewrap payload is unavailable; installing the distribution package instead"
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends bubblewrap
+              bwrap --version
+            fi
+          ) &
+          sandbox_pid=$!
+          install_status=0
+          wait "$install_pid" || install_status=$?
+          sandbox_status=0
+          wait "$sandbox_pid" || sandbox_status=$?
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          exit "$sandbox_status"
+      - name: Re-assert tested SHA and clean tree before the gate
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TESTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Run exhaustive coverage
+        run: pnpm run check:ci:coverage
