@@ -1,0 +1,278 @@
+# TEMPORARY confirmation-only workflow.
+#
+# Exists solely on the throwaway branch `ci/pre-packaging-linux-confirmation`
+# and is never merged. The code under test is NOT this branch: every job pins
+# the tested commit explicitly and proves the resulting SHA and a clean tree.
+#
+# Purpose: close the two gates that the Windows authoring host cannot judge
+# faithfully (`check:ci:static` and `check:ci:coverage`), because that host has
+# `core.symlinks=false` and no privilege to materialize the repository's 11
+# symlink entries.
+#
+# Scope for this round, per instruction:
+#   install, typecheck, verify-third-party-notices, lint, static, coverage,
+#   and bench (cost-permitting).
+# Deliberately NOT run: consumers (its capacity limit is already established),
+# node-compat, python-sdk, and the Windows lanes.
+#
+# Deviations from the official jobs are limited to runner selection (hosted
+# `ubuntu-latest` instead of the DeepSeek `dsh-ubuntu-24-04-16core` label) and
+# to skipping the pnpm/Playwright `actions/cache/restore` steps, which are
+# performance-only and change no gate result. Gate commands, gate env, Node
+# version, pnpm version (from the repository's `packageManager` field) and the
+# bubblewrap preparation are copied verbatim from `.github/workflows/ci.yml`.
+name: Pre-Packaging Linux Confirmation
+
+on:
+  push:
+    branches:
+      - ci/pre-packaging-linux-confirmation
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  TESTED_SHA: d27b0ebb1601dc860289e1cc28e20d8bc15493e8
+  # `github.event.pull_request.base.sha` for this commit: the merge base of the
+  # tested commit and the fork's default branch. ci.yml passes this to the
+  # frozen-archive gate.
+  ARCHIVE_BASE_REF: c291e7961a515f6d7af9304e7fd1d257929aef26
+
+jobs:
+  linux-cheap:
+    name: "node 24 / install + typecheck + notices + lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+      - name: Use runner-owned temporary storage
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+      - name: Redirect Node compile cache to runner temp
+        run: echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+      - name: Re-assert tested SHA and clean tree before the gates
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TESTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Typecheck
+        run: pnpm run typecheck
+      - name: Third-party notices
+        run: pnpm run verify-third-party-notices
+      - name: Lint
+        run: pnpm run lint
+
+  linux-static:
+    name: "node 24 / static (official: check:ci:static)"
+    runs-on: ubuntu-latest
+    env:
+      DSH_GATE_CONCURRENCY: '8'
+      DSH_GATE_FAIL_FAST: '1'
+      DSH_ARCHIVE_BASE_REF: c291e7961a515f6d7af9304e7fd1d257929aef26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Use runner-owned temporary storage
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+      - name: Redirect Node compile cache to runner temp
+        run: echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+      - name: Re-assert tested SHA and clean tree before the gates
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TESTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Run static gates
+        run: pnpm run check:ci:static
+
+  linux-static-all-gates:
+    name: "node 24 / static - ALL gates, fail-fast disabled (diagnostic)"
+    runs-on: ubuntu-latest
+    env:
+      DSH_GATE_CONCURRENCY: '8'
+      DSH_ARCHIVE_BASE_REF: c291e7961a515f6d7af9304e7fd1d257929aef26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Use runner-owned temporary storage
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+      - name: Redirect Node compile cache to runner temp
+        run: echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+      - name: Re-assert tested SHA and clean tree before the gates
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TESTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Run every static gate without fail-fast
+        run: pnpm run check:ci:static
+
+  linux-coverage:
+    name: "node 24 / coverage (official: check:ci:coverage)"
+    runs-on: ubuntu-latest
+    env:
+      DSH_COVERAGE_MAX_WORKERS: '6'
+      DSH_COVERAGE_PARTITIONS: '4'
+      DSH_GATE_CONCURRENCY: '3'
+      DSH_COVERAGE_TEST_TIMEOUT_MS: '90000'
+      DSH_GATE_FAIL_FAST: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+      - name: Use runner-owned temporary storage
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+      - name: Redirect Node compile cache to runner temp
+        run: echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install dependencies and prepare bubblewrap
+        run: |
+          pnpm install --frozen-lockfile &
+          install_pid=$!
+          (
+            if ! bash scripts/prepare-ci-bubblewrap.sh; then
+              echo "::warning::the pinned bubblewrap payload is unavailable; installing the distribution package instead"
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends bubblewrap
+              bwrap --version
+            fi
+          ) &
+          sandbox_pid=$!
+          install_status=0
+          wait "$install_pid" || install_status=$?
+          sandbox_status=0
+          wait "$sandbox_pid" || sandbox_status=$?
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          exit "$sandbox_status"
+      - name: Re-assert tested SHA and clean tree before the gates
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TESTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Run exhaustive coverage
+        run: pnpm run check:ci:coverage
+
+  linux-bench:
+    name: "node 24 / benchmarks (official: check:ci:bench)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+      - name: Install benchmark browser and hosted dependencies
+        run: pnpm --filter @deepseek-ai/dsh-benchmarks exec playwright install --with-deps chromium
+      - name: Run performance benchmarks
+        env:
+          DSH_GATE_VERBOSE: '1'
+        run: pnpm run check:ci:bench
+
+  confirmation-summary:
+    name: pre-packaging linux confirmation summary
+    runs-on: ubuntu-latest
+    needs:
+      - linux-cheap
+      - linux-static
+      - linux-static-all-gates
+      - linux-coverage
+      - linux-bench
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Report the confirmation lanes
+        run: |
+          echo "tested SHA: ${TESTED_SHA}"
+          echo "confirmation lanes:"
+          echo "  install+typecheck+notices+lint = ${{ needs.linux-cheap.result }}"
+          echo "  static (official env)          = ${{ needs.linux-static.result }}"
+          echo "  static (all gates, diagnostic) = ${{ needs.linux-static-all-gates.result }}"
+          echo "  coverage                       = ${{ needs.linux-coverage.result }}"
+          echo "  bench                          = ${{ needs.linux-bench.result }}"
