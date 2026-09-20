@@ -1,4 +1,4 @@
-﻿# TEMPORARY validation-only workflow.
+# TEMPORARY validation-only workflow.
 #
 # It exists solely on the throwaway branch `ci/peer-contract-validation` and is
 # never merged. The code under test is NOT this branch: every job pins the
