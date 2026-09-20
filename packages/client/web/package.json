@@ -20,7 +20,7 @@
     },
     "./platform": {
       "types": "./lib/types/platform.d.ts",
-      "default": "./lib/types/platform.js"
+      "default": "./lib/platform.js"
     },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
@@ -47,7 +47,7 @@
   "files": [
     "lib/index.js",
     "lib/**/*.css",
-    "lib/types/**/*.js",
+    "lib/platform.js",
     "lib/types/**/*.d.ts"
   ]
 }
