@@ -166,7 +166,7 @@ describe('desktop external plugin profile', () => {
       beforeChange: async () => { expect(readFileSync(join(profile, 'cordis.patch.yml'), 'utf8')).toBe(': broken') },
       afterChange: async () => {
         manager.assertProfileRuntime(profile)
-        expect(readFileSync(manager.paths.lock, 'utf8').trim()).toBe(String(process.pid))
+        expect(JSON.parse(readFileSync(manager.paths.lock, 'utf8'))).toMatchObject({ pid: process.pid })
         await expect(manager.applyRelease()).rejects.toThrow('another package transaction is active')
       },
     }))
@@ -575,7 +575,9 @@ describe('desktop external plugin profile', () => {
         return existsSync(ready)
       }, { timeout: task.timeout }).toBe(true)
       signal.throwIfAborted()
-      expect(readFileSync(manager.paths.lock, 'utf8').trim()).toBe(readFileSync(ready, 'utf8'))
+      expect(JSON.parse(readFileSync(manager.paths.lock, 'utf8'))).toMatchObject({
+        pid: process.pid, workerPid: Number(readFileSync(ready, 'utf8')),
+      })
       await expect(manager.applyRelease()).rejects.toThrow(/another package transaction/u)
     } finally {
       writeFileSync(release, 'continue')

@@ -2,20 +2,16 @@
 
 import { valid } from 'semver'
 import { spawn } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import {
   existsSync,
-  fsyncSync,
-  ftruncateSync,
   lstatSync,
   mkdirSync,
-  openSync,
-  closeSync,
   readFileSync,
   readdirSync,
   realpathSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs'
 import { delimiter, dirname, join, resolve, sep } from 'node:path'
 import {
@@ -25,6 +21,8 @@ import {
 } from './core-package-set.ts'
 import type { DesktopPaths } from './paths.ts'
 import { removeOwnedDirectory } from './owned-directory.ts'
+import { DesktopPackageLock, writePackageRecord } from './package-lock.ts'
+import { PACKAGE_WORKER_SOURCE } from './package-worker.ts'
 import type { DesktopRelease } from './release.ts'
 import { desktopRuntimeId, readDesktopRuntime, type DesktopRuntimeDescriptor } from './runtime-tree.ts'
 import {
@@ -86,6 +84,7 @@ const MAX_PNPM_DIAGNOSTIC_BYTES = 64 * 1024
 const DESKTOP_REGISTRY = 'https://registry.npmjs.org/'
 /** Marker the profile carries while a package-manager operation is unfinished. */
 const PENDING_PACKAGES = 'desktop-packages-pending'
+const TRANSACTION_SNAPSHOT = 'desktop-transaction-snapshot.json'
 
 /** Profile bytes one transaction restores when it fails after touching them. */
 interface DesktopProfileSnapshot {
@@ -303,7 +302,7 @@ function inspectPlugin(projectDir: string, requestedName: string): DesktopPlugin
 
 /** Desktop npm project manager: one profile transaction at a time, rolling a failed change back. */
 export class DesktopProjectManager {
-  private lockDescriptor: number | undefined
+  private transactionLock: DesktopPackageLock | undefined
   private descriptor: DesktopRuntimeDescriptor | undefined
 
   /**
@@ -370,6 +369,39 @@ export class DesktopProjectManager {
   }
 
   private get pendingPackages(): string { return join(this.paths.profile, PENDING_PACKAGES) }
+  private get transactionSnapshot(): string { return join(this.paths.profile, TRANSACTION_SNAPSHOT) }
+
+  private saveTransactionSnapshot(snapshot: DesktopProfileSnapshot): void {
+    writePackageRecord(this.transactionSnapshot, {
+      schemaVersion: 1, manifest: snapshot.manifest.toString('base64'), lockfile: snapshot.lockfile?.toString('base64'),
+    })
+  }
+
+  private clearTransactionSnapshot(): void {
+    if (existsSync(this.transactionSnapshot)) unlinkSync(this.transactionSnapshot)
+  }
+
+  private async recoverInterruptedMutation(): Promise<boolean> {
+    if (!existsSync(this.transactionSnapshot)) return false
+    const value = readJson(this.transactionSnapshot)
+    if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.manifest !== 'string'
+      || (value.lockfile !== undefined && typeof value.lockfile !== 'string')) {
+      throw new Error('desktop project: invalid package transaction snapshot')
+    }
+    const decode = (text: string): Buffer => {
+      const bytes = Buffer.from(text, 'base64')
+      if (bytes.toString('base64') !== text) throw new Error('desktop project: invalid package transaction snapshot encoding')
+      return bytes
+    }
+    const snapshot: DesktopProfileSnapshot = {
+      manifest: decode(value.manifest), lockfile: value.lockfile === undefined ? undefined : decode(value.lockfile),
+    }
+    writeFileSync(this.pendingPackages, '')
+    restoreProfileSnapshot(this.paths.profile, snapshot)
+    await this.restorePackages(this.paths.profile, snapshot)
+    this.clearTransactionSnapshot()
+    return true
+  }
 
   private currentRuntime(): DesktopRuntimeDescriptor {
     if (this.descriptor === undefined) throw new Error('desktop project: runtime metadata has not been loaded')
@@ -392,6 +424,7 @@ export class DesktopProjectManager {
     return this.withLock(async () => {
       const target = this.readRuntime()
       this.descriptor = target
+      const recovered = await this.recoverInterruptedMutation()
       const previous = readDesktopProfileState(this.paths.profile)
       if (!existsSync(this.pendingPackages) && previous?.runtimeId === desktopRuntimeId(target)
         && previous.lockHash === desktopPluginLockHash(this.paths.profile)
@@ -399,7 +432,7 @@ export class DesktopProjectManager {
         && previous.links.every(link => existsSync(link.target)
           && existsSync(join(this.paths.profile, 'node_modules', link.name))
           && realpathSync.native(link.target) === realpathSync.native(join(this.runtime.dsh, 'node_modules', link.name)))) {
-        return false
+        return recovered
       }
       if (previous === undefined) createPluginProfile(this.paths.profile)
       await this.reconcileProfile(this.paths.profile, previous)
@@ -424,6 +457,10 @@ export class DesktopProjectManager {
       this.currentRuntime()
       if (!existsSync(this.paths.profile)) throw new Error('desktop project: active profile is not installed')
       await hooks.beforeChange()
+      if (mutation.type === 'plugin-add' || mutation.type === 'plugin-remove' || mutation.type === 'plugin-update') {
+        await this.recoverInterruptedMutation()
+        if (existsSync(this.pendingPackages)) await this.reconcileProfile(this.paths.profile, readDesktopProfileState(this.paths.profile))
+      }
       const snapshot = profileSnapshot(this.paths.profile)
       const markedBefore = existsSync(this.pendingPackages)
       if (mutation.type === 'plugins-disable-all') {
@@ -434,6 +471,7 @@ export class DesktopProjectManager {
             dsh: { ...manifest.dsh, profile: { ...manifest.dsh.profile, bundles: [...DESKTOP_PROFILE_BUNDLES] } },
           })
           this.prepareProfile(this.paths.profile)
+          this.clearTransactionSnapshot()
         } catch (error) {
           throw await this.restoreFailure(this.paths.profile, snapshot, false, markedBefore, error)
         }
@@ -442,8 +480,9 @@ export class DesktopProjectManager {
       }
       const previous = readDesktopProfileState(this.paths.profile)
       const packagesChanged = mutation.type !== 'plugin-toggle'
-      if (packagesChanged) unlinkDesktopHostPackages(this.paths.profile)
+      if (packagesChanged) this.saveTransactionSnapshot(snapshot)
       try {
+        if (packagesChanged) unlinkDesktopHostPackages(this.paths.profile)
         try {
           await this.applyMutation(this.paths.profile, mutation)
         } finally {
@@ -451,8 +490,11 @@ export class DesktopProjectManager {
         }
         await this.reconcileProfile(this.paths.profile, previous, packagesChanged)
       } catch (error) {
-        throw await this.restoreFailure(this.paths.profile, snapshot, packagesChanged, markedBefore, error)
+        const failure = await this.restoreFailure(this.paths.profile, snapshot, packagesChanged, markedBefore, error)
+        if (packagesChanged && failure.restored) this.clearTransactionSnapshot()
+        throw failure
       }
+      if (packagesChanged) this.clearTransactionSnapshot()
       await hooks.afterChange()
     })
   }
@@ -514,8 +556,8 @@ export class DesktopProjectManager {
     if (snapshot.lockfile === undefined) {
       // The pre-mutation profile owned no lockfile, so its node_modules only ever
       // held host links: relinking is the whole restore, with no manager run.
-      if (existsSync(this.pendingPackages)) unlinkSync(this.pendingPackages)
       this.prepareProfile(projectDir)
+      if (existsSync(this.pendingPackages)) unlinkSync(this.pendingPackages)
       return
     }
     // Reinstall from the restored lockfile through the same pending path a runtime
@@ -615,8 +657,11 @@ export class DesktopProjectManager {
       name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
     )))
     writeFileSync(this.pendingPackages, '')
+    const lock = this.transactionLock
+    if (lock === undefined) throw new Error('desktop project: package transaction lost its lock')
     await new Promise<void>((settle, reject) => {
       const child = spawn(this.runtime.node, [
+        '--eval', `void (async () => { ${PACKAGE_WORKER_SOURCE} })()`, lock.workerPath, this.runtime.dsh,
         this.runtime.pnpm,
         `--config.registry=${DESKTOP_REGISTRY}`,
         `--config.store-dir=${this.paths.pnpm.store}`,
@@ -638,7 +683,8 @@ export class DesktopProjectManager {
           XDG_CONFIG_HOME: this.paths.pnpm.config,
           XDG_STATE_HOME: this.paths.pnpm.state,
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        windowsHide: true,
       })
       let failure: Error | undefined
       let diagnostics = ''
@@ -646,15 +692,16 @@ export class DesktopProjectManager {
       const appendDiagnostics = (chunk: string): void => {
         diagnostics = (diagnostics + chunk).slice(-MAX_PNPM_DIAGNOSTIC_BYTES)
       }
-      child.stdout.setEncoding('utf8')
-      child.stdout.on('data', appendDiagnostics)
-      child.stderr.setEncoding('utf8')
-      child.stderr.on('data', appendDiagnostics)
+      // The IPC overload is nullable, but descriptors 1 and 2 above are pipes.
+      for (const output of [child.stdout as Readable, child.stderr as Readable]) {
+        output.setEncoding('utf8')
+        output.on('data', appendDiagnostics)
+      }
       const complete = (settleChild: () => void): void => {
         if (completed) return
         completed = true
         try {
-          this.writeLockOwner(process.pid)
+          lock.worker(undefined)
         } catch (error) {
           reject(errorOf(error, 'desktop project: failed to return the package transaction lock to Electron'))
           return
@@ -674,62 +721,35 @@ export class DesktopProjectManager {
           ))
         })
       })
-      try {
-        if (child.pid === undefined) throw new Error('desktop project: pnpm did not report a process id')
-        this.writeLockOwner(child.pid)
-      } catch (error) {
-        failure = errorOf(error, 'desktop project: failed to assign the package transaction lock to pnpm')
-        child.kill('SIGKILL')
-      }
+      child.once('message', (message: unknown) => {
+        try {
+          if (!isRecord(message) || message.type !== 'package-worker-ready' || child.pid === undefined) {
+            throw new Error('desktop project: invalid package worker readiness')
+          }
+          lock.worker(child.pid)
+          child.send({ type: 'run' }, (error) => {
+            if (error === null) return
+            failure = error
+            child.kill('SIGKILL')
+          })
+        } catch (error) {
+          failure = errorOf(error, 'desktop project: failed to grant the package transaction to pnpm')
+          child.kill('SIGKILL')
+        }
+      })
     })
-  }
-
-  private writeLockOwner(pid: number): void {
-    const descriptor = this.lockDescriptor
-    if (descriptor === undefined) throw new Error('desktop project: package transaction lost its lock')
-    const content = Buffer.from(`${String(pid)}\n`)
-    ftruncateSync(descriptor, 0)
-    writeSync(descriptor, content, 0, content.byteLength, 0)
-    fsyncSync(descriptor)
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
     mkdirSync(this.paths.profile, { recursive: true, mode: 0o700 })
     if (lstatSync(this.paths.profile).isSymbolicLink()) throw new Error('desktop project: profile directory must not be a link')
-    let descriptor: number
+    const lock = await DesktopPackageLock.acquire(this.paths.lock, this.runtime.dsh)
     try {
-      descriptor = openSync(this.paths.lock, 'wx', 0o600)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        const lock = lstatSync(this.paths.lock)
-        if (lock.isSymbolicLink() || !lock.isFile()) {
-          throw new Error('desktop project: package transaction lock is not a regular file')
-        }
-        const owner = Number.parseInt(readFileSync(this.paths.lock, 'utf8').trim(), 10)
-        let active = !Number.isSafeInteger(owner) || owner <= 0
-        if (!active) {
-          try {
-            process.kill(owner, 0)
-            active = true
-          } catch (signalError) {
-            active = (signalError as NodeJS.ErrnoException).code !== 'ESRCH'
-          }
-        }
-        if (active) throw new Error('desktop project: another package transaction is active')
-        unlinkSync(this.paths.lock)
-        descriptor = openSync(this.paths.lock, 'wx', 0o600)
-      } else {
-        throw error
-      }
-    }
-    try {
-      this.lockDescriptor = descriptor
-      this.writeLockOwner(process.pid)
+      this.transactionLock = lock
       return await operation()
     } finally {
-      this.lockDescriptor = undefined
-      closeSync(descriptor)
-      unlinkSync(this.paths.lock)
+      this.transactionLock = undefined
+      await lock.release()
     }
   }
 }
