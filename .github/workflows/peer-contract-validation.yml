@@ -25,14 +25,14 @@ jobs:
       - name: Checkout frozen peer-contract commit
         uses: actions/checkout@v6
         with:
-          ref: 09894c13a59fa3d1182c887d19f4bc7ba9750f14
+          ref: cecaa390c7efedcf132bf387084c10228721f30a
 
       - name: Prove tested SHA and clean tree
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
           echo "git rev-parse HEAD = ${sha}"
-          test "${sha}" = "09894c13a59fa3d1182c887d19f4bc7ba9750f14"
+          test "${sha}" = "cecaa390c7efedcf132bf387084c10228721f30a"
           status="$(git status --porcelain)"
           echo "git status --porcelain = [${status}]"
           test -z "${status}"
@@ -53,7 +53,7 @@ jobs:
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
           echo "git rev-parse HEAD = ${sha}"
-          test "${sha}" = "09894c13a59fa3d1182c887d19f4bc7ba9750f14"
+          test "${sha}" = "cecaa390c7efedcf132bf387084c10228721f30a"
           status="$(git status --porcelain)"
           echo "git status --porcelain = [${status}]"
           test -z "${status}"
