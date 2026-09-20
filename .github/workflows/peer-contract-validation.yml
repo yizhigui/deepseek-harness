@@ -1,4 +1,4 @@
-# TEMPORARY validation-only workflow.
+﻿# TEMPORARY validation-only workflow.
 #
 # It exists solely on the throwaway branch `ci/peer-contract-validation` and is
 # never merged. The code under test is NOT this branch: every job pins the
@@ -65,6 +65,7 @@ jobs:
         with:
           ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Use runner-owned temporary storage
         run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
       - name: Redirect Node compile cache to runner temp
@@ -436,6 +437,7 @@ jobs:
         with:
           ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Use runner-owned temporary storage
         run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
       - name: Redirect Node compile cache to runner temp
