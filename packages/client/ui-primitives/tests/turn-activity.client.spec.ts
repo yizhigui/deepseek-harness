@@ -42,6 +42,16 @@ describe('turnActivity', () => {
     expect(turnActivity({ running: false }, { turns })).toEqual({ active: true, startTime: null })
   })
 
+  it('keeps the newest anchor when a later open turn is older', () => {
+    // Turn boundaries can arrive out of order, and the clock must never move
+    // backwards because a stale open turn was read after a newer one.
+    const turns = new Map([
+      [1, { status: 'open' as const, start: { time: 40 } }],
+      [2, { status: 'open' as const, start: { time: 10 } }],
+    ])
+    expect(turnActivity({ running: false }, { turns })).toEqual({ active: true, startTime: 40 })
+  })
+
   it('ignores a turn whose status is unknown', () => {
     const turns = new Map([[1, { status: 'unknown' as const, start: { time: 5 } }]])
     expect(turnActivity({ running: false }, { turns })).toEqual({ active: false, startTime: null })

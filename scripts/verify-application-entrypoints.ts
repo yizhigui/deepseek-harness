@@ -32,6 +32,12 @@ const MANIFEST_BIN_ALLOWLIST = new Map<string, ManifestBin>([
 /** Every JavaScript executable in an application or packaging workspace has one explicit role. */
 const EXECUTABLE_SOURCE_ALLOWLIST = new Map<string, string>([
   ['apps/cli/src/bin.ts', 'supported dsh application launcher'],
+  // The portable distribution targets are build/packaging tools run through the
+  // package's own npm scripts or DISTRIBUTION-WINDOWS.md pipeline, never a
+  // shipped Node application launcher.
+  ['apps/desktop-portable/scripts/build-icons.mjs', 'private build-only icon generator'],
+  ['apps/desktop-portable/scripts/inspect-desktop-ui.mjs', 'private development-only packaged-UI inspector'],
+  ['apps/desktop-portable/scripts/package-portable.mjs', 'private packaging-only portable target builder'],
   ['packages/context/time-context/tests/fixtures/driver.ts', 'test-only subprocess driver'],
   ['packages/experimental/webworker-packer/bin.js', 'private build-only wrapper'],
   ['packages/experimental/webworker-packer/src/bin.ts', 'private build-only implementation'],

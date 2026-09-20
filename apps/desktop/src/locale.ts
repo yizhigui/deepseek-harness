@@ -60,6 +60,11 @@ export const en = {
   closeToTrayHint: 'DeepSeek Harness keeps running in the notification area.',
   notificationTaskCompleted: 'Task completed',
   notificationTaskFailed: 'The task failed. Open DeepSeek Harness for details.',
+  // Refusals of the Host's reserved native-path request. The request has no
+  // renderer seat, so the shell answers it with its own locale-owned copy.
+  nativePathRequestMustUsePost: 'The native path request must use POST',
+  nativePathRequestMalformed: 'The native path request is malformed',
+  nativePathMissing: 'The path no longer exists: {path}',
 } as const
 
 /** Every Desktop locale supplies the complete English key set. */
@@ -125,6 +130,9 @@ export const zh = {
   closeToTrayHint: 'DeepSeek Harness 会继续在通知区域运行。',
   notificationTaskCompleted: '任务已完成',
   notificationTaskFailed: '任务执行失败，请打开 DeepSeek Harness 查看详情。',
+  nativePathRequestMustUsePost: '原生路径请求必须使用 POST',
+  nativePathRequestMalformed: '原生路径请求格式不正确',
+  nativePathMissing: '该路径已不存在：{path}',
 } as const satisfies DesktopMessages
 
 /** Locale payload exposed to the Desktop-owned renderer. */

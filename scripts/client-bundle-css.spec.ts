@@ -1,10 +1,16 @@
 /**
  * Stylesheets enter client bundles through virtual modules, so the loader must
  * register their physical files as watch dependencies.
+ *
+ * The virtual id is repository-relative: a built bundle must never disclose the
+ * checkout path (the ids reach generated region comments), and the id has to be
+ * reversible back to the physical stylesheet. Fixtures therefore live inside
+ * the checkout; the last case pins the refusal for anything outside it.
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { clientBundle } from '../packages/client/tsdown.client.ts'
 
@@ -12,6 +18,15 @@ interface CssPlugin {
   name: string
   resolveId?: (source: string, importer?: string) => string | null
   load?: (this: { addWatchFile(id: string): void }, id: string) => Promise<string | null>
+}
+
+/** Repository-relative fixture base: gitignored, and outside every repository walk. */
+const FIXTURE_ROOT = fileURLToPath(new URL('../node_modules/.cache/client-bundle-css', import.meta.url))
+
+/** Create one fixture directory the plugin can address with a repository-relative id. */
+async function fixture(name: string): Promise<string> {
+  await mkdir(FIXTURE_ROOT, { recursive: true })
+  return await mkdtemp(join(FIXTURE_ROOT, name))
 }
 
 function cssPlugin(name: 'dsh-css-modules-inline' | 'dsh-css-global-inline' | 'dsh-css-text-inline'): CssPlugin {
@@ -29,7 +44,7 @@ function cssPlugin(name: 'dsh-css-modules-inline' | 'dsh-css-global-inline' | 'd
 
 describe('client bundle CSS Modules', () => {
   it('registers the source stylesheet as a watch dependency', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-client-css-watch-'))
+    const root = await fixture('modules-')
     try {
       const stylesheet = join(root, 'Fixture.module.css')
       const importer = join(root, 'index.ts')
@@ -53,7 +68,7 @@ describe('client bundle CSS Modules', () => {
 
 describe('client bundle global CSS', () => {
   it('compiles a side-effect stylesheet into a watched style injector', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-client-global-css-watch-'))
+    const root = await fixture('global-')
     try {
       const stylesheet = join(root, 'base.css')
       const importer = join(root, 'index.ts')
@@ -76,7 +91,7 @@ describe('client bundle global CSS', () => {
   })
 
   it('compiles inline stylesheets as watched text without a module side effect', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-client-inline-css-watch-'))
+    const root = await fixture('inline-')
     try {
       const stylesheet = join(root, 'base.css')
       const importer = join(root, 'index.ts')
@@ -93,6 +108,19 @@ describe('client bundle global CSS', () => {
       expect(watched).toEqual([stylesheet])
       expect(output).toContain('export default "body{color:red}"')
       expect(output).not.toContain('data-plugin-css')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('client bundle stylesheet boundary', () => {
+  it('refuses a stylesheet outside the checkout, whose id could not stay relative', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-client-css-outside-'))
+    try {
+      const plugin = cssPlugin('dsh-css-global-inline')
+      expect(() => plugin.resolveId?.('./base.css', join(root, 'index.ts')))
+        .toThrow(/is outside the repository/u)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

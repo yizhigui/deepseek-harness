@@ -3,6 +3,7 @@
  * suppression and de-duplication, and the tray controls.
  */
 
+import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const electron = vi.hoisted(() => {
@@ -181,10 +182,9 @@ describe('task notifications', () => {
 })
 
 describe('tray', () => {
-  it('publishes the application identity and creates the icon with its menu', () => {
+  it('creates the notification-area icon with its menu', () => {
     const subject = harness()
     subject.lifecycle.setup()
-    expect(electron.app.setAppUserModelId).toHaveBeenCalledWith(DESKTOP_APP_USER_MODEL_ID)
     expect(electron.FakeTray.instances).toHaveLength(1)
     const tray = electron.FakeTray.instances[0]!
     expect(tray.setToolTip).toHaveBeenCalledWith('DeepSeek Harness')
@@ -194,6 +194,15 @@ describe('tray', () => {
     ])
     template[1]!.click!()
     expect(subject.activate).toHaveBeenCalledOnce()
+  })
+
+  // `DesktopLifecycle.setup` publishes the identity only on win32, where an
+  // installed application id is what attributes a native toast; the call is not
+  // part of the cross-platform setup path.
+  it.skipIf(process.platform !== 'win32')('publishes the Windows toast identity', () => {
+    const subject = harness()
+    subject.lifecycle.setup()
+    expect(electron.app.setAppUserModelId).toHaveBeenCalledWith(DESKTOP_APP_USER_MODEL_ID)
   })
 
   it('quits only through the tray Quit item', () => {
@@ -221,7 +230,9 @@ describe('tray', () => {
     expect(electron.FakeTray.instances[0]!.destroy).toHaveBeenCalledOnce()
   })
 
-  it('registers the OS session-end guard so shutdown is never blocked', () => {
+  // `installSessionEndGuard` registers the powerMonitor 'shutdown' listener only
+  // on win32, where logoff and uninstall must be able to close the application.
+  it.skipIf(process.platform !== 'win32')('registers the OS session-end guard so shutdown is never blocked', () => {
     const subject = harness()
     subject.lifecycle.setup()
     expect(electron.powerMonitor.on).toHaveBeenCalledWith('shutdown', expect.any(Function))
@@ -242,19 +253,25 @@ describe('tray', () => {
 })
 
 describe('tray icon resolution', () => {
+  // The roots are spelled the way the Windows distribution lays them out; the
+  // expected value is built with `join`, so the candidate ordering is asserted
+  // identically wherever the suite runs instead of assuming a separator.
+  const APP_PATH = 'C:\\app'
+  const RESOURCES_PATH = 'C:\\resources'
+
   it('prefers the application path and falls back to the resources path', () => {
     electron.existsSync.mockImplementation((path: string) => path.includes('resources'))
-    expect(resolveTrayIconPath(true, 'C:\\app', 'C:\\resources'))
-      .toBe('C:\\resources\\assets\\icon.ico')
+    expect(resolveTrayIconPath(true, APP_PATH, RESOURCES_PATH))
+      .toBe(join(RESOURCES_PATH, 'assets', 'icon.ico'))
   })
 
   it('resolves the shipped asset in a development shell', () => {
     electron.existsSync.mockImplementation((path: string) => path.endsWith('icon.ico'))
-    expect(resolveTrayIconPath(false, 'C:\\app', 'C:\\resources')).toBe('C:\\app\\assets\\icon.ico')
+    expect(resolveTrayIconPath(false, APP_PATH, RESOURCES_PATH)).toBe(join(APP_PATH, 'assets', 'icon.ico'))
   })
 
   it('reports no asset when nothing was shipped', () => {
     electron.existsSync.mockReturnValue(false)
-    expect(resolveTrayIconPath(true, 'C:\\app', 'C:\\resources')).toBeUndefined()
+    expect(resolveTrayIconPath(true, APP_PATH, RESOURCES_PATH)).toBeUndefined()
   })
 })

@@ -2,6 +2,7 @@
   "name": "@deepseek-ai/dsh-desktop-portable",
   "description": "Additive electron-builder targets for the official DeepSeek Harness desktop shell",
   "private": true,
+  "license": "MIT",
   "version": "0.1.5-rc.2",
   "type": "module",
   "scripts": {

@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ubuntu's package transaction scans the hosted image's full dpkg database and
-# runs post-install hooks. CI needs only the signed-archive payload, so pin and
-# verify that payload before extracting it into the ephemeral runner directory.
-readonly BUBBLEWRAP_VERSION='0.9.0-1ubuntu0.1'
-readonly BUBBLEWRAP_SHA256='1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a'
-readonly BUBBLEWRAP_URL="https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb"
+# Hosted and in-house Linux runners ship no bubblewrap, and installing it
+# through the package transaction scans the image's whole dpkg database and runs
+# post-install hooks. CI needs only the signed-archive payload, so this script
+# downloads the distribution package, verifies it while extracting it into the
+# ephemeral runner directory, and proves the binary confines a real process.
+#
+# The package is resolved through APT's signed package index rather than pinned
+# by archive filename. Ubuntu removes a superseded revision from the pool, so a
+# pinned `bubblewrap_<version>_amd64.deb` URL rots without warning and takes
+# every lane that provisions it down with it. The resolved archive name and its
+# SHA-256 are printed below, so a run records exactly which payload it used.
 
 : "${RUNNER_TEMP:?prepare-ci-bubblewrap requires RUNNER_TEMP}"
 : "${GITHUB_PATH:?prepare-ci-bubblewrap requires GITHUB_PATH}"
@@ -16,12 +21,24 @@ if [[ "$(uname -s)" != 'Linux' || "$(uname -m)" != 'x86_64' ]]; then
   exit 1
 fi
 
-archive="${RUNNER_TEMP}/bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb"
 root="${RUNNER_TEMP}/dsh-bubblewrap"
+download="${RUNNER_TEMP}/dsh-bubblewrap-package"
+rm -rf "$root" "$download"
+mkdir -p "$root" "$download"
 
-curl --fail --silent --show-error --location --retry 3 --retry-all-errors --output "$archive" "$BUBBLEWRAP_URL"
-printf '%s  %s\n' "$BUBBLEWRAP_SHA256" "$archive" | sha256sum --check --status
-mkdir -p "$root"
+# Refresh the index first: a stale list can name a revision the archive has
+# already removed, which would otherwise surface as an unexplained 404.
+sudo apt-get update -qq
+(cd "$download" && apt-get download bubblewrap)
+
+archive=$(find "$download" -maxdepth 1 -type f -name 'bubblewrap_*_amd64.deb' -print -quit)
+if [[ -z "$archive" ]]; then
+  echo 'prepare-ci-bubblewrap: the package index resolved no bubblewrap archive' >&2
+  exit 1
+fi
+echo "prepare-ci-bubblewrap: $(basename "$archive")"
+sha256sum "$archive"
+
 dpkg-deb --extract "$archive" "$root"
 printf '%s\n' "$root/usr/bin" >> "$GITHUB_PATH"
 
