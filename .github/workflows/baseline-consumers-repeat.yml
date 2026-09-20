@@ -1,0 +1,91 @@
+# TEMPORARY repetition workflow.
+#
+# It exists solely on the throwaway branch `ci/baseline-consumers-repeat` and is
+# never merged. Its question: does the official `node-24-consumers` command pass
+# on a standard GitHub-hosted runner when sampled several times?
+#
+# The mirrored validation run saw that lane fail while every other official
+# blocking lane passed. The failing gate was `test:expected`, and the same specs
+# pass 3/3 when run alone on the same runner class, so this workflow samples the
+# whole lane three times, one runner each, with the official job env and command
+# and no other job in the run.
+name: Baseline Consumers Lane Repetition
+
+on:
+  push:
+    branches:
+      - ci/baseline-consumers-repeat
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  TESTED_SHA: f8707e1f057d7591d8fe923899847bce81a60ce7
+
+jobs:
+  consumers-lane:
+    name: "official consumers lane repetition ${{ matrix.rep }} of 3"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3]
+    env:
+      DSH_GATE_CONCURRENCY: '10'
+      DSH_NODE_COMPAT_SKIP_TYPECHECK: '1'
+      DSH_OXLINT_THREADS: '8'
+      DSH_PUBLINT_CONCURRENCY: '8'
+      DSH_WEB_SNAPSHOT_WORKERS: '6'
+      DSH_GATE_FAIL_FAST: '1'
+      DSH_SNAPSHOT_MAX_CONCURRENCY: '32'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          persist-credentials: false
+      - name: Use runner-owned temporary storage
+        run: |
+          echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TEMP%/*}/ms-playwright" >> "$GITHUB_ENV"
+      - name: Redirect Node compile cache to runner temp
+        run: echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+      - name: Prove tested SHA and clean tree
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "git rev-parse HEAD = ${sha}"
+          test "${sha}" = "${TESTED_SHA}"
+          status="$(git status --porcelain)"
+          echo "git status --porcelain = [${status}]"
+          test -z "${status}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - name: Configure pnpm store path
+        run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+      - name: Install dependencies and prepare bubblewrap
+        run: |
+          pnpm install --frozen-lockfile &
+          install_pid=$!
+          bash scripts/prepare-ci-bubblewrap.sh &
+          sandbox_pid=$!
+          install_status=0
+          wait "$install_pid" || install_status=$?
+          sandbox_status=0
+          wait "$sandbox_pid" || sandbox_status=$?
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          exit "$sandbox_status"
+      - name: Install web frontend browsers
+        run: |
+          pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
+          pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install chromium
+      - name: Re-assert tested SHA and clean tree before the gates
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TESTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Run compatibility, snapshot, and artifact gates
+        run: pnpm run check:ci:consumers
+
