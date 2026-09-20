@@ -59,7 +59,7 @@ jobs:
     env:
       DSH_GATE_CONCURRENCY: '8'
       DSH_GATE_FAIL_FAST: '1'
-      DSH_ARCHIVE_BASE_REF: ${{ env.ARCHIVE_BASE_REF }}
+      DSH_ARCHIVE_BASE_REF: c291e7961a515f6d7af9304e7fd1d257929aef26
     steps:
       - uses: actions/checkout@v6
         with:
