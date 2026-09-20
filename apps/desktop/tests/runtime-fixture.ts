@@ -2,6 +2,7 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DESKTOP_HOST_RUNTIME_FILES } from '../src/core-package-set.ts'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/host-protocol.ts'
 import { writeDesktopRuntime, type DesktopRuntimeDescriptor } from '../src/runtime-tree.ts'
@@ -42,5 +43,12 @@ export function runtimeFixture(
     writeFileSync(path, '')
   }
   writeFileSync(join(root, 'package.json'), '{"type":"module"}\n')
+  if (process.platform !== 'win32') {
+    // The ordinary test command builds native-system before running fixtures.
+    // Delegate to its real addon, so subprocess guards exercise kernel flock.
+    const entry = fileURLToPath(new URL('../../../native/system/packages/entry/lib/flock.js', import.meta.url))
+    writePackage(join(root, 'node_modules'), '@deepseek-ai/node-addon-system', { exports: { './flock': './index.js' } },
+      `export { tryLockExclusive } from ${JSON.stringify(pathToFileURL(entry).href)}\n`)
+  }
   return writeDesktopRuntime(root, { schemaVersion: 1, version, nodeVersion, pnpmVersion: '11.7.0', hostProtocolVersion: DESKTOP_HOST_PROTOCOL_VERSION }, [...names, ...sharedNames])
 }

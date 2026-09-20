@@ -35,13 +35,15 @@ Electron 根据应用 locale 选择类型化的英文或中文桌面壳文案，
 2. 兼容的应用升级在当前 profile 中刷新共享链接，并检查已启用插件的 peer 要求。插件文件、配置、版本和锁文件留在原处；不运行 pnpm。
 3. 内置 Node 版本、平台或架构变化时，禁用脚本重新安装锁定的插件依赖图，验证并链接宿主包，然后运行已批准的待执行构建并再次验证。
 4. 插件添加、更新和删除使用内置 pnpm 及 Desktop 独有的包管理器状态。保留的宿主包必须声明为 peer；共享包的嵌套副本和别名会被验证拒绝。普通插件依赖必须解析到 profile 内部。
-5. 插件变更在直接修改当前 profile 前停止后端。准备成功后启动 Host。包操作或 Host 启动失败会保留已修改文件并报告错误。未完成的包操作保留标记，使下次启动重试锁定依赖的安装和待执行构建。Desktop 不创建 staging 目录、激活日志或回滚副本。
+5. 插件变更在直接修改当前 profile 前停止后端。包操作失败时，通过既有准备路径恢复变更前的 manifest 和 lockfile。持久元数据快照让启动流程能在 crash 后重试恢复。准备成功先提交，再启动 Host；Host 启动失败保留已提交的图。Desktop 不创建 staging profile 或包目录副本。
 
-加载页不依赖 Host。错误页提供重启和重装指导。只有已打包应用的资源支持 profile 恢复时，才提供禁用插件和重置 Desktop；开发模式和早期初始化失败只提供重启。应用菜单仍提供插件管理器入口。每次后端启动前都会检查运行时标识；插件修改不自动回滚。
+加载页不依赖 Host。错误页提供重启和重装指导。只有已打包应用的资源支持 profile 恢复时，才提供禁用插件和重置 Desktop；开发模式和早期初始化失败只提供重启。应用菜单仍提供插件管理器入口。每次后端启动前都会检查运行时标识。
 
 重置删除 `$DSH_HOME/profiles/desktop` 中除所持事务锁外的所有条目，然后初始化内置 profile。它删除 Desktop 配置和已安装第三方包，不保留备份。共享任务、设置和 Harness-home `.env` 保持不变。壳资源和 preload 失败时使用独立文档显示可用恢复操作和诊断；其控件不依赖 preload。
 
-包事务独占持有 `$DSH_HOME/profiles/desktop/lock`，直到 pnpm 进程退出。重置保留目录及其锁，直到初始化和 Host 启动完成。共享链接在 macOS/Linux 使用目录软链接，在 Windows 使用 junction；清理只移除链接，不删除其目标。共享包使用文件系统的规范路径识别，因此 Windows 路径大小写变化不会单独触发 profile 激活。原生构建遵循 profile 中经过审查的 `allowBuilds` 列表；新安装的包如果需要构建但未在列表中获准，事务会失败。
+内核保护资源排除并发包事务和仍存活的 pnpm worker；`$DSH_HOME/profiles/desktop/lock` 记录诊断 PID 和事务 token。恢复先取得两种保护资源，再替换废弃的 ownership。活跃保护资源不会超时失效。旧版仅含 PID 的记录只有在 PID 确认不存在时才回收；损坏或无法读取的 owner 信息保守拒绝。独立的 `desktop-packages-pending` 标记请求准备，而 `desktop-transaction-snapshot.json` 将中断变更的元数据保留到恢复或提交完成。重置保留所持事务锁。参见[恢复决策](../../.agents/notes/implemented/bug-fix/2026-09-21-desktop-package-lock-recovery.zh.md)。
+
+共享链接在 macOS/Linux 使用目录软链接，在 Windows 使用 junction；清理只移除链接，不删除其目标。共享包使用文件系统的规范路径识别，因此 Windows 路径大小写变化不会单独触发 profile 激活。原生构建遵循 profile 中经过审查的 `allowBuilds` 列表；新安装的包如果需要构建但未在列表中获准，事务会失败。
 
 ## 开发
 

@@ -12,7 +12,7 @@ staging 能保留旧插件安装，但增加 profile 复制、目录移动、恢
 
 Desktop 停止 Host 后直接修改当前 profile。修改包前解除宿主共享链接，操作结束后恢复链接。保留包锁、依赖验证和已批准的原生构建。兼容升级只刷新链接，不复制插件文件。
 
-包操作或 Host 失败会保留部分修改，供修复和重试。不使用 staging profile、激活日志、目录切换恢复或自动回滚。已有临时目录不会被解释或删除。
+[包事务恢复决策](../bug-fix/2026-09-21-desktop-package-lock-recovery.zh.md)负责异常回滚与 crash 恢复。不使用 staging profile 或目录切换恢复。包提交后的 Host 失败保留已提交的依赖图。已有临时目录不会被解释或删除。
 
 本决策取代以下记录中的 staging 和回滚：[2026-08-25-electron-desktop-packaging-and-updates](2026-08-25-electron-desktop-packaging-and-updates.zh.md), [2026-09-08-desktop-bundled-runtime-and-external-plugins](2026-09-08-desktop-bundled-runtime-and-external-plugins.zh.md), [2026-09-09-desktop-immediate-window-and-direct-start](2026-09-09-desktop-immediate-window-and-direct-start.zh.md)。其他发布、模块实例和窗口生命周期决策继续有效。
 
