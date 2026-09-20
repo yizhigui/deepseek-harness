@@ -29,6 +29,7 @@ import { initializeShellLog, writeShellLog, defaultShellLogDirectory } from './l
 import { desktopConfigDirectory } from './config-directory.ts'
 import { desktopHostEnvironment, resolveDesktopHome } from './desktop-config.ts'
 import { DesktopLifecycle } from './lifecycle.ts'
+import { attachTextContextMenu } from './text-context-menu.ts'
 import { TaskCompletionWatcher } from './task-signals.ts'
 import { createMarketInstallResolver, loadMarketRegistry } from './market-source.ts'
 
@@ -139,6 +140,10 @@ function createWindow(preload: string, show = false): BrowserWindow {
     },
   })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // One attachment point for every Desktop window: the application document,
+  // the plugin-manager window, the startup and emergency documents, and any
+  // window added later all get the same native text menu.
+  attachTextContextMenu(window)
   window.webContents.on('will-navigate', (event, url) => {
     if (new URL(url).protocol !== `${SCHEME}:`) event.preventDefault()
     const page = emergencyPages.get(window)
