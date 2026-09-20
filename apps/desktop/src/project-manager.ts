@@ -734,15 +734,30 @@ export class DesktopProjectManager {
   }
 }
 
-/** Create build-only project metadata for materializing the signed runtime. */
-export function createRuntimeProjectMetadata(projectDir: string, release: DesktopRelease): void {
+/**
+ * Create build-only project metadata for materializing the signed runtime.
+ * @param projectDir - Build directory holding the verified package set.
+ * @param release - Release identity bound to the packaged application.
+ * @param hostProvidedPeers - Client-platform singletons the runtime must also
+ *   materialize for plugins. They are pinned exactly and installed from the
+ *   registry, because no core tarball supplies them and the Desktop runtime
+ *   directory is their only home.
+ */
+export function createRuntimeProjectMetadata(
+  projectDir: string,
+  release: DesktopRelease,
+  hostProvidedPeers: readonly { readonly name: string; readonly version: string }[] = [],
+): void {
   mkdirSync(projectDir, { recursive: true, mode: 0o700 })
   const packageSet = verifyDesktopCorePackageSet(projectDir, release.version)
   const manifest: DesktopProjectManifest = {
     name: PROJECT_NAME,
     private: true,
     version: '0.0.0',
-    dependencies: desktopCorePackageOverrides(packageSet),
+    dependencies: {
+      ...desktopCorePackageOverrides(packageSet),
+      ...Object.fromEntries(hostProvidedPeers.map(peer => [peer.name, peer.version])),
+    },
     dsh: { profile: { bundles: [...DESKTOP_PROFILE_BUNDLES] } },
   }
   writeJson(join(projectDir, 'package.json'), manifest)
