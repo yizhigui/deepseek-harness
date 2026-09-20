@@ -6,6 +6,11 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "../../packages/util/home-paths" }
+    { "path": "../../packages/util/home-paths" },
+    // Host face of the renderer shell package: owns the pure-data platform
+    // contract that src/platform-peers.ts classifies. The reference keeps the
+    // contract's declarations built before this project resolves them, and
+    // keeps the Client face out of this program.
+    { "path": "../../packages/client/web/tsconfig.host.json" }
   ]
 }

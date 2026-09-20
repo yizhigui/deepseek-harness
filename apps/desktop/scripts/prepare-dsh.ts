@@ -26,8 +26,10 @@ import {
 } from './macos-runtime.ts'
 import { resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
 import { desktopRuntimeFileExclusion } from './runtime-file-policy.ts'
+import { platformClosureRoots, platformRegistryPeers } from '../src/platform-peers.ts'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
+const RENDERER_ROOT = resolve(APP_ROOT, '..', 'web')
 const BUILD_PATHS = resolveDesktopTargetBuildPaths()
 const DSH_OUTPUT_ROOT = BUILD_PATHS.dsh
 const BUILD_ROOT = mkdtempSync(join(tmpdir(), 'dsh-desktop-runtime-'))
@@ -106,9 +108,17 @@ async function main(): Promise<void> {
   mkdirSync(STORE_ROOT, { recursive: true })
   try {
     const release = desktopRelease()
+    // Resolved before the runtime is materialized: the renderer's own installed
+    // versions are the ones its bundle inlines, so these entries are what a
+    // plugin's client face actually executes against. First-party platform
+    // packages need no resolution here 鈥?they already arrive inside the packed
+    // core closure (`prepare-package-set.ts` adds them as closure roots).
+    console.log(`desktop runtime: platform closure roots ${platformClosureRoots().join(', ')}`)
+    const platformPeers = platformRegistryPeers(RENDERER_ROOT)
+    console.log(`desktop runtime: registry platform peers ${platformPeers.map(peer => `${peer.name}@${peer.version}`).join(', ')}`)
     copyFileSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGE_SET_FILE), join(BUILD_ROOT, DESKTOP_PACKAGE_SET_FILE))
     cpSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGES_DIR), join(BUILD_ROOT, DESKTOP_PACKAGES_DIR), { recursive: true })
-    createRuntimeProjectMetadata(BUILD_ROOT, release)
+    createRuntimeProjectMetadata(BUILD_ROOT, release, platformPeers)
     await runPnpm(['install', '--lockfile-only'])
     verifyDesktopCoreLockfile(
       readFileSync(join(BUILD_ROOT, 'pnpm-lock.yaml'), 'utf8'),
@@ -126,17 +136,35 @@ async function main(): Promise<void> {
     })
     writeFileSync(join(DSH_OUTPUT_ROOT, 'package.json'), `${JSON.stringify({
       name: '@deepseek-ai/dsh-desktop-runtime', private: true, version: release.version, type: 'module',
-      dependencies: Object.fromEntries(packageSet.packages.map(entry => [entry.name, entry.version])),
+      dependencies: {
+        ...Object.fromEntries(packageSet.packages.map(entry => [entry.name, entry.version])),
+        ...Object.fromEntries(platformPeers.map(peer => [peer.name, peer.version])),
+      },
     }, undefined, 2)}\n`)
     for (const file of DESKTOP_HOST_RUNTIME_FILES) {
       if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', DESKTOP_HOST_PACKAGE, file))) {
         throw new Error(`desktop runtime: missing private Host file ${file}`)
       }
     }
+    // Share a peer only once it is provably on disk: an entry recorded without a
+    // materialized package would link a broken junction into every profile and
+    // admit a plugin whose peer nothing satisfies.
+    for (const peer of platformPeers) {
+      const manifestPath = join(DSH_OUTPUT_ROOT, 'node_modules', peer.name, 'package.json')
+      if (!existsSync(manifestPath)) throw new Error(`desktop runtime: host-provided peer ${peer.name}@${peer.version} was not materialized`)
+      const materialized = JSON.parse(readFileSync(manifestPath, 'utf8')) as { version?: unknown }
+      if (materialized.version !== peer.version) {
+        throw new Error(`desktop runtime: host-provided peer ${peer.name} materialized as ${String(materialized.version)}, expected ${peer.version}`)
+      }
+    }
     if (process.platform === 'darwin') {
       await signMacOSRuntime(DSH_OUTPUT_ROOT, resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env))
     }
-    writeDesktopRuntime(DSH_OUTPUT_ROOT, release, packageSet.packages.map(entry => entry.name), target)
+    writeDesktopRuntime(
+      DSH_OUTPUT_ROOT, release,
+      [...packageSet.packages.map(entry => entry.name), ...platformPeers.map(peer => peer.name)],
+      target,
+    )
     const descriptor = await verifyDesktopRuntime(DSH_OUTPUT_ROOT, release.version, target)
     await new Promise<void>((accept, reject) => {
       execFile(NODE, [join(APP_ROOT, 'tests/fixtures/runtime-payload-smoke.mjs'), DSH_OUTPUT_ROOT],

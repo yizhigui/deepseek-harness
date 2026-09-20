@@ -1,0 +1,16 @@
+{
+  // Host face of this Client package: only the platform module contract, which
+  // is pure data and therefore safe for Host-face programs (the Desktop
+  // packaging scripts and their tests) to consume through the published
+  // `@deepseek-ai/dsh-client-web/platform` subpath. The Client face stays in
+  // tsconfig.json; a file listed here and there emits the same bytes.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
+  },
+  "files": [
+    "src/platform.ts"
+  ]
+}

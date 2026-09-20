@@ -13,6 +13,7 @@ import {
 } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
+import { platformClosureRoots } from '../src/platform-peers.ts'
 import {
   DESKTOP_HOST_PACKAGE,
   DESKTOP_HOST_RUNTIME_FILES,
@@ -51,10 +52,15 @@ function dependencyNames(manifest: Readonly<Record<string, unknown>>, section: s
 /**
  * Select the complete available first-party dependency closures rooted at dsh and its private Host.
  * @param available - Packed packages indexed by package name.
+ * @param extraRoots - Additional release packages the runtime must carry even
+ *   though nothing in the core graph depends on them. The renderer shell's
+ *   platform packages arrive this way: plugins declare peers on them, so a
+ *   Desktop profile can only resolve those peers if the runtime hosts them.
  * @returns Selected packages sorted by name.
  */
 export function selectDesktopPackageClosure(
   available: ReadonlyMap<string, PackedDesktopPackage>,
+  extraRoots: readonly string[] = [],
 ): PackedDesktopPackage[] {
   const selected = new Map<string, PackedDesktopPackage>()
   const visit = (name: string): void => {
@@ -76,6 +82,12 @@ export function selectDesktopPackageClosure(
   }
   for (const name of ROOT_PACKAGES) {
     if (!available.has(name)) throw new Error(`desktop package set: packed inputs omit ${name}`)
+    visit(name)
+  }
+  // An extra root that the pack does not carry is a build defect, not a silent
+  // omission: the runtime would record a peer nothing materializes.
+  for (const name of extraRoots) {
+    if (!available.has(name)) throw new Error(`desktop package set: packed inputs omit platform package ${name}`)
     visit(name)
   }
   return [...selected.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, packed]) => packed)
@@ -121,9 +133,18 @@ export function assertDesktopHostPackageFiles(files: readonly string[]): void {
   }
 }
 
-/** Prepare a package set from release tarball directories. */
-export function prepareDesktopPackageSet(inputs: readonly string[], output: string): void {
-  const selected = selectDesktopPackageClosure(packedPackages(inputs))
+/**
+ * Prepare a package set from release tarball directories.
+ * @param inputs - Directories holding the release tarballs (dsh pack, vendor pack, native packages).
+ * @param output - Package-set directory to write.
+ * @param extraRoots - Platform packages to carry beyond the core dependency graph.
+ */
+export function prepareDesktopPackageSet(
+  inputs: readonly string[],
+  output: string,
+  extraRoots: readonly string[] = platformClosureRoots(),
+): void {
+  const selected = selectDesktopPackageClosure(packedPackages(inputs), extraRoots)
   const host = selected.find(packed => packed.manifest.name === DESKTOP_HOST_PACKAGE)
   if (host === undefined) throw new Error(`desktop package set: selected closure omits ${DESKTOP_HOST_PACKAGE}`)
   assertDesktopHostPackageFiles(tarballFiles(host.tarball))
