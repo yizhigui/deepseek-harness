@@ -26,7 +26,7 @@ import {
 } from './macos-runtime.ts'
 import { resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
 import { desktopRuntimeFileExclusion } from './runtime-file-policy.ts'
-import { resolveDesktopHostProvidedPeers } from '../src/host-provided-peers.ts'
+import { platformClosureRoots, platformRegistryPeers } from '../src/platform-peers.ts'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const RENDERER_ROOT = resolve(APP_ROOT, '..', 'web')
@@ -110,12 +110,15 @@ async function main(): Promise<void> {
     const release = desktopRelease()
     // Resolved before the runtime is materialized: the renderer's own installed
     // versions are the ones its bundle inlines, so these entries are what a
-    // plugin's client face actually executes against.
-    const hostProvidedPeers = resolveDesktopHostProvidedPeers(RENDERER_ROOT)
-    console.log(`desktop runtime: host-provided peers ${hostProvidedPeers.map(peer => `${peer.name}@${peer.version}`).join(', ')}`)
+    // plugin's client face actually executes against. First-party platform
+    // packages need no resolution here 鈥?they already arrive inside the packed
+    // core closure (`prepare-package-set.ts` adds them as closure roots).
+    console.log(`desktop runtime: platform closure roots ${platformClosureRoots().join(', ')}`)
+    const platformPeers = platformRegistryPeers(RENDERER_ROOT)
+    console.log(`desktop runtime: registry platform peers ${platformPeers.map(peer => `${peer.name}@${peer.version}`).join(', ')}`)
     copyFileSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGE_SET_FILE), join(BUILD_ROOT, DESKTOP_PACKAGE_SET_FILE))
     cpSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGES_DIR), join(BUILD_ROOT, DESKTOP_PACKAGES_DIR), { recursive: true })
-    createRuntimeProjectMetadata(BUILD_ROOT, release, hostProvidedPeers)
+    createRuntimeProjectMetadata(BUILD_ROOT, release, platformPeers)
     await runPnpm(['install', '--lockfile-only'])
     verifyDesktopCoreLockfile(
       readFileSync(join(BUILD_ROOT, 'pnpm-lock.yaml'), 'utf8'),
@@ -135,7 +138,7 @@ async function main(): Promise<void> {
       name: '@deepseek-ai/dsh-desktop-runtime', private: true, version: release.version, type: 'module',
       dependencies: {
         ...Object.fromEntries(packageSet.packages.map(entry => [entry.name, entry.version])),
-        ...Object.fromEntries(hostProvidedPeers.map(peer => [peer.name, peer.version])),
+        ...Object.fromEntries(platformPeers.map(peer => [peer.name, peer.version])),
       },
     }, undefined, 2)}\n`)
     for (const file of DESKTOP_HOST_RUNTIME_FILES) {
@@ -146,7 +149,7 @@ async function main(): Promise<void> {
     // Share a peer only once it is provably on disk: an entry recorded without a
     // materialized package would link a broken junction into every profile and
     // admit a plugin whose peer nothing satisfies.
-    for (const peer of hostProvidedPeers) {
+    for (const peer of platformPeers) {
       const manifestPath = join(DSH_OUTPUT_ROOT, 'node_modules', peer.name, 'package.json')
       if (!existsSync(manifestPath)) throw new Error(`desktop runtime: host-provided peer ${peer.name}@${peer.version} was not materialized`)
       const materialized = JSON.parse(readFileSync(manifestPath, 'utf8')) as { version?: unknown }
@@ -159,7 +162,7 @@ async function main(): Promise<void> {
     }
     writeDesktopRuntime(
       DSH_OUTPUT_ROOT, release,
-      [...packageSet.packages.map(entry => entry.name), ...hostProvidedPeers.map(peer => peer.name)],
+      [...packageSet.packages.map(entry => entry.name), ...platformPeers.map(peer => peer.name)],
       target,
     )
     const descriptor = await verifyDesktopRuntime(DSH_OUTPUT_ROOT, release.version, target)
