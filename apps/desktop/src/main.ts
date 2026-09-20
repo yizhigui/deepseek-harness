@@ -20,7 +20,7 @@ import { assertPackageName, DesktopProjectManager, DesktopProjectMutationError, 
 import { DesktopHostProcess } from './host-process.ts'
 import { DesktopBackendController, type DesktopBackendState } from './backend-controller.ts'
 import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
-import { formatDesktopMessage, resolveDesktopLocale } from './locale.ts'
+import { formatDesktopMessage, resolveDesktopLocale, type DesktopMessages } from './locale.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { DesktopUpdateCoordinator } from './update-coordinator.ts'
 import { desktopErrorState } from './startup-error.ts'
@@ -195,23 +195,26 @@ function parseNativePathRequest(value: unknown): DesktopNativePathRequest | null
  * spawned `explorer.exe /select,` cannot do that reliably for non-ASCII or long
  * paths, and reports its failure by silently opening the wrong folder.
  * @param request - the piped request addressed to the reserved path.
+ * @param messages - the shell's resolved locale copy, which owns the refusals.
  * @returns a JSON reply describing the outcome.
  */
-async function serveNativePathRequest(request: Request): Promise<Response> {
+async function serveNativePathRequest(request: Request, messages: DesktopMessages): Promise<Response> {
   const reply = (body: { ok: boolean; message?: string }, status = 200): Response => new Response(
     JSON.stringify(body),
     { status, headers: { 'content-type': 'application/json; charset=utf-8' } },
   )
-  if (request.method !== 'POST') return reply({ ok: false, message: 'native path requests must use POST' }, 405)
+  if (request.method !== 'POST') return reply({ ok: false, message: messages.nativePathRequestMustUsePost }, 405)
   let parsed: DesktopNativePathRequest | null
   try {
     parsed = parseNativePathRequest(await request.json())
   } catch {
     parsed = null
   }
-  if (parsed === null) return reply({ ok: false, message: 'native path request is malformed' }, 400)
+  if (parsed === null) return reply({ ok: false, message: messages.nativePathRequestMalformed }, 400)
   const target = resolve(parsed.path)
-  if (!existsSync(target)) return reply({ ok: false, message: `the path no longer exists: ${target}` }, 404)
+  if (!existsSync(target)) {
+    return reply({ ok: false, message: formatDesktopMessage(messages.nativePathMissing, { path: target }) }, 404)
+  }
   try {
     if (parsed.operation === 'reveal') {
       const info = await stat(target)
@@ -430,7 +433,7 @@ async function main(): Promise<void> {
     })
     if (url.hostname !== 'app') return Promise.resolve(new Response(null, { status: 404 }))
     // Reserved path: answered by the shell, never forwarded to the Host.
-    if (url.pathname === NATIVE_PATH) return serveNativePathRequest(request)
+    if (url.pathname === NATIVE_PATH) return serveNativePathRequest(request, messages)
     const active = backend.host
     if (active === undefined) return Promise.resolve(new Response('backend unavailable', { status: 503 }))
     return active.fetch(request)
